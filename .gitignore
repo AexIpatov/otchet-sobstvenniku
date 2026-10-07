@@ -1,0 +1,26 @@
+# Python-кэш
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Локальные секреты (НЕ заливать!)
+.streamlit/secrets.toml
+
+# Сгенерированные отчёты
+data/output/
+
+# Исходные данные пользователя (НЕ заливать!)
+data/input/ОПиУ/
+data/input/Прогнозы/
+*.xlsx~
+~$*.xlsx
+
+# Файлы ОС
+.DS_Store
+Thumbs.db
+
+# Временные папки
+.venv/
+venv/
+env/
