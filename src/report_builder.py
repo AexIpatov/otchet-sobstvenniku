@@ -14,6 +14,7 @@ import openpyxl
 import config
 from src.parsers import (
     parse_opiu, parse_bdr, parse_forecast, parse_investments,
+    parse_vat, parse_vat_ref_bdr, parse_vat_ref_forecast,
 )
 
 
@@ -52,6 +53,32 @@ def _parse_forecast_safe(path, sheet, month, row_map):
         return parse_forecast(path, sheet, month, row_map)
     except FileNotFoundError:
         return {}
+
+
+def _parse_vat_safe(year, month, objects):
+    """Безопасная обёртка над parse_vat."""
+    try:
+        return parse_vat(config.TEMP_VAT_DIR, year, month, objects)
+    except Exception as e:
+        print(f"[WARN] [vat] ошибка: {e}")
+        return {"НДС": 0.0, "с_НДС": 0.0}
+
+
+def _parse_vat_ref_bdr_safe(path, month, block_name, objects):
+    try:
+        return parse_vat_ref_bdr(path, month, block_name, objects)
+    except Exception as e:
+        print(f"[WARN] [vat_ref bdr] ошибка: {e}")
+        return None
+
+
+def _parse_vat_ref_forecast_safe(path, sheet_name, month, block_name, objects):
+    try:
+        return parse_vat_ref_forecast(path, sheet_name, month,
+                                      block_name, objects)
+    except Exception as e:
+        print(f"[WARN] [vat_ref forecast] ошибка: {e}")
+        return None
 
 
 # ============================================================
@@ -118,6 +145,14 @@ def _empty_period():
         "plan_month": {},
         "fact_month": {},
         "next_forecast": {},
+        # НДС, собранный отдельно от выручки:
+        "vat": {
+            "prev_fact":     None,   # колонка C
+            "plan_year":     None,   # колонка E
+            "plan_month":    None,   # колонка F
+            "fact_month":    None,   # колонка H
+            "next_forecast": None,   # колонка J
+        },
     }
 
 
@@ -231,12 +266,62 @@ def _collect_block(block, sources):
             path_fc, src["forecast_sheet"], config.NEXT_MONTH, row_map
         )
 
+    # ----------------------------------------------------------
+    # Сбор НДС для строки «Выручка с НДС»
+    # ----------------------------------------------------------
+    vat = result["vat"]
+    objects = src.get("opiu_objects") or []
+
+    # C — факт прошлого месяца: НДС из файлов НДС за прошлый месяц
+    vat["prev_fact"] = _parse_vat_safe(
+        config.PREV_YEAR, config.PREV_MONTH, objects
+    )["НДС"]
+
+    # H — факт текущего месяца: НДС из файлов НДС за текущий месяц
+    vat["fact_month"] = _parse_vat_safe(
+        config.REPORT_YEAR, config.REPORT_MONTH, objects
+    )["НДС"]
+
+    # E — план года: НДС из БДиР
+    if src.get("bdr_file"):
+        path_bdr = config.BDR_FILES.get(src["bdr_file"])
+        vat["plan_year"] = _parse_vat_ref_bdr_safe(
+            path_bdr, config.REPORT_MONTH, block, objects
+        )
+
+    # F — план месяца: НДС из Прогнозов
+    if src.get("forecast_file") and src.get("forecast_sheet"):
+        path_fc = config.FORECAST_FILES.get(src["forecast_file"])
+        vat["plan_month"] = _parse_vat_ref_forecast_safe(
+            path_fc, src["forecast_sheet"], config.REPORT_MONTH, block, objects
+        )
+
+    # J — прогноз будущего: НДС из Прогнозов
+    if src.get("forecast_file") and src.get("forecast_sheet"):
+        path_fc = config.FORECAST_FILES.get(src["forecast_file"])
+        vat["next_forecast"] = _parse_vat_ref_forecast_safe(
+            path_fc, src["forecast_sheet"], config.NEXT_MONTH, block, objects
+        )
+
     return result
 
 
 def _consolidate(source_blocks, collected):
     result = _empty_period()
     for period in result.keys():
+        if period == "vat":
+            # Складываем НДС по подблокам: None + число = число.
+            for vat_key in result["vat"].keys():
+                parts = [
+                    collected[b]["vat"].get(vat_key)
+                    for b in source_blocks
+                    if b in collected and "vat" in collected[b]
+                ]
+                parts = [p for p in parts if p is not None]
+                if parts:
+                    result["vat"][vat_key] = sum(parts)
+            continue
+
         for b in source_blocks:
             if b not in collected:
                 continue
@@ -766,6 +851,76 @@ def _safe_apply_format(ws, row, col):
             return
 
 
+def _write_vat_row(ws, r, block_data):
+    """
+    Заполняет строку «Выручка с НДС» в блоке.
+
+    Логика:
+      - если выручка без НДС = 0 → пишем пусто;
+      - для каждой колонки отдельно проверяем, попадает ли её МЕСЯЦ
+        в диапазон НДС (>= сентябрь 2026):
+          * если ДА  → пишем «Выручка без НДС + НДС»;
+          * если НЕТ → пишем «= Выручка без НДС» (НДС = 0).
+
+    ВАЖНО: месяц каждой колонки определяется отдельно:
+      C — прошлый месяц (PREV_YEAR, PREV_MONTH)
+      E — отчётный месяц (REPORT_YEAR, REPORT_MONTH)
+      F — отчётный месяц (REPORT_YEAR, REPORT_MONTH)
+      H — отчётный месяц (REPORT_YEAR, REPORT_MONTH)
+      J — следующий месяц (NEXT_YEAR, NEXT_MONTH)
+    """
+    from_periods = (
+        (3,  "prev_fact",     config.PREV_YEAR,   config.PREV_MONTH),
+        (5,  "plan_year",     config.REPORT_YEAR, config.REPORT_MONTH),
+        (6,  "plan_month",    config.REPORT_YEAR, config.REPORT_MONTH),
+        (8,  "fact_month",    config.REPORT_YEAR, config.REPORT_MONTH),
+        (10, "next_forecast", config.NEXT_YEAR,   config.NEXT_MONTH),
+    )
+
+    revenue_keys = [k for k in config.TEMPLATE_ROW_MAP
+                    if k.startswith("Выручка")]
+
+    vat_start = (config.VAT_START_YEAR, config.VAT_START_MONTH)
+
+    for col_idx, period, y, m in from_periods:
+        base = sum(
+            float(block_data.get(period, {}).get(k, 0.0) or 0.0)
+            for k in revenue_keys
+        )
+
+        if base == 0:
+            cell = ws.cell(row=r, column=col_idx)
+            if type(cell).__name__ != "MergedCell":
+                cell.value = None
+            continue
+
+        # Для каждой колонки своя проверка месяца
+        is_vat_active = (y, m) >= vat_start
+
+        vat_add = 0.0
+        if is_vat_active:
+            vat_val = block_data.get("vat", {}).get(period)
+            if vat_val is not None:
+                vat_add = float(vat_val)
+
+        value = abs(base) + abs(vat_add)
+
+        cell = ws.cell(row=r, column=col_idx)
+        if type(cell).__name__ == "MergedCell":
+            _safe_set_value(ws, r, col_idx, value)
+            _safe_apply_format(ws, r, col_idx)
+        else:
+            # force_overwrite=True — строка «Выручка с НДС» должна
+            # перезаписывать формулу шаблона (=SUM(...)),
+            # иначе получится «Выручка с НДС» = «Выручка без НДС».
+            _write_cell(cell, value, force_overwrite=True)
+            _apply_number_format(cell)
+
+        if config.DEBUG:
+            print(f"[VAT] стр.{r} кол.{col_idx}: {y}-{m:02d} "
+                  f"выручка={base} НДС={vat_add} → {value}")
+
+
 def _write_block(ws, block_start, block_data, investments_amount):
     if config.DEBUG:
         print(f"[write] блок начинается в строке {block_start}")
@@ -806,6 +961,12 @@ def _write_block(ws, block_start, block_data, investments_amount):
         if not title:
             continue
         if _norm_for_compare(title) in skip_titles_norm:
+            continue
+
+        # --- СПЕЦИАЛЬНАЯ ОБРАБОТКА СТРОКИ «ВЫРУЧКА С НДС» ---
+        if _norm_for_compare(_strip_prefix(title_raw)) == \
+                _norm_for_compare(config.VAT_ROW_TITLE):
+            _write_vat_row(ws, r, block_data)
             continue
 
         # ДИАГНОСТИКА: показываем, что именно пишем в строку «Зарплата».

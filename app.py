@@ -342,8 +342,8 @@ def _file_status_table():
     for report_key in ("Estate", "Unelma", "Nomiqa"):
         missing = config.check_inputs(report_key)
         flat = []
-        for k in ("opiu_prev", "opiu_cur", "bdr", "forecast"):
-            for p in missing[k]:
+        for k in ("opiu_prev", "opiu_cur", "bdr", "forecast", "vat"):
+            for p in missing.get(k, []):
                 flat.append((k, Path(p)))
         result[report_key] = flat
     return result
@@ -397,12 +397,23 @@ with col2:
     )
 
 with col3:
+    # Показываем реальное количество загруженных файлов.
+    # Считаем во временной папке — так счётчик не сбрасывается
+    # при повторном рендере страницы.
+    try:
+        _n_opiu_now = len(list(config.TEMP_OPIU_DIR.glob("*.xlsx")))
+        _n_fc_now   = len(list(config.TEMP_FORECAST_DIR.glob("*.xlsx")))
+        _n_vat_now  = len(list(config.TEMP_VAT_DIR.glob("*.xlsx")))
+        _uploaded_now = _n_opiu_now + _n_fc_now + _n_vat_now
+    except Exception:
+        _uploaded_now = 0
+
     st.markdown(
-        """
+        f"""
         <div class="metric-card">
             <div class="metric-label">📤 Загружено файлов</div>
-            <div class="metric-value" id="uploaded-count">0</div>
-            <div class="metric-sub">через форму ниже</div>
+            <div class="metric-value">{_uploaded_now}</div>
+            <div class="metric-sub">ОПиУ · БДиР · Прогнозы · НДС</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -434,7 +445,8 @@ st.markdown(
 )
 st.markdown(
     '<div class="section-hint">'
-    'Загрузите файлы ОПиУ, БДиР и Прогнозов. Шаблоны и справочники уже встроены в программу — их загружать не нужно.'
+    'Загрузите файлы ОПиУ, БДиР, Прогнозов и НДС. '
+    'Шаблоны и справочники уже встроены в программу — их загружать не нужно.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -474,6 +486,20 @@ with st.expander("📙 Прогнозы месячные", expanded=True):
         key="upload_forecast",
     )
 
+with st.expander("📕 НДС (файлы «НДС ММ.ГГГГ <Статья>.xlsx»)", expanded=True):
+    st.caption(
+        "Загрузите файлы НДС **за прошлый месяц** (для колонки C) "
+        "и **за текущий месяц** (для колонки H). "
+        "Файлы должны содержать в имени слово «НДС» и расширение `.xlsx`. "
+        "Например: `НДС 09.2026 Выручка от аренды.xlsx`."
+    )
+    vat_files = st.file_uploader(
+        "Выберите один или несколько файлов НДС (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="upload_vat",
+    )
+
 
 # ============================================================
 # СОХРАНЕНИЕ ЗАГРУЖЕННЫХ ФАЙЛОВ ВО ВРЕМЕННУЮ ПАПКУ
@@ -499,13 +525,14 @@ def _save_uploaded(files, target_dir):
 n_opiu = _save_uploaded(opiu_files, config.TEMP_OPIU_DIR)
 n_bdr = _save_uploaded(bdr_files, config.TEMP_FORECAST_DIR)
 n_forecast = _save_uploaded(forecast_files, config.TEMP_FORECAST_DIR)
+n_vat = _save_uploaded(vat_files, config.TEMP_VAT_DIR)
 
-total_uploaded = n_opiu + n_bdr + n_forecast
+total_uploaded = n_opiu + n_bdr + n_forecast + n_vat
 
 if total_uploaded > 0:
     st.success(
         f"✅ Сохранено во временную папку: ОПиУ — {n_opiu}, "
-        f"БДиР — {n_bdr}, Прогнозов — {n_forecast}."
+        f"БДиР — {n_bdr}, Прогнозов — {n_forecast}, НДС — {n_vat}."
     )
 
 
@@ -531,6 +558,7 @@ for report_key in ("Estate", "Unelma", "Nomiqa"):
             "opiu_cur":  "ОПиУ за текущий месяц",
             "bdr":       "БДиР",
             "forecast":  "Прогноз месячный",
+            "vat":       "НДС",
         }
         with st.expander(f"⚠️ {report_key}: не хватает {len(missing)} файлов", expanded=False):
             for k, p in missing:

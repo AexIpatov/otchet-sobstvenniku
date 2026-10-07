@@ -41,9 +41,10 @@ TEMP_DIR      = Path(tempfile.gettempdir()) / "otchet_sobstvenniku"
 # Подпапки внутри временной папки
 TEMP_OPIU_DIR     = TEMP_DIR / "ОПиУ"
 TEMP_FORECAST_DIR = TEMP_DIR / "Прогнозы"
+TEMP_VAT_DIR      = TEMP_DIR / "НДС"
 
 # Создаём папки (если их нет)
-for _d in (OUTPUT_DIR, TEMP_DIR, TEMP_OPIU_DIR, TEMP_FORECAST_DIR):
+for _d in (OUTPUT_DIR, TEMP_DIR, TEMP_OPIU_DIR, TEMP_FORECAST_DIR, TEMP_VAT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -100,6 +101,74 @@ TEMPLATE_FILES = {
     "Unelma": TEMPLATES_DIR / "Шаблон Отчета Unelma.xlsx",
     "Nomiqa": TEMPLATES_DIR / "Шаблон Отчета Nomiqa.xlsx",
 }
+
+
+# ============================================================
+# 6b. НДС
+# ============================================================
+# Логика:
+#   - Колонка C (факт прошлого месяца)  — НДС из файлов НДС за прошлый месяц
+#   - Колонка E (план года из БДиР)     — НДС из БДиР, строка «Справочно по НДС выручки:»
+#   - Колонка F (план месяца из Прогнозов) — НДС из Прогнозов, та же строка
+#   - Колонка H (факт текущего месяца)  — НДС из файлов НДС за текущий месяц
+#   - Колонка J (прогноз будущего)      — НДС из Прогнозов, та же строка
+#
+# Если месяц колонки < VAT_START_MONTH (сентябрь 2026) — НДС = 0,
+# и «Выручка с НДС» = «Выручка без НДС».
+
+# С какого месяца заполняем строку «Выручка с НДС» реальным НДС.
+VAT_START_YEAR  = 2026
+VAT_START_MONTH = 9
+
+# Названия строк в шаблоне
+VAT_ROW_TITLE        = "Выручка с НДС"
+VAT_ROW_TITLE_NO_VAT = "Выручка без НДС"
+
+# Строка со справочной суммой НДС в БДиР и Прогнозах
+VAT_REF_ROW_TITLE = "Справочно по НДС выручки:"
+
+# Имя листа в файлах НДС
+VAT_SHEET_NAME = "Статьи свободного ввода в ОПиУ"
+
+# Названия колонок в файлах НДС
+VAT_COL_ITEM   = "Статья"
+VAT_COL_MONTH  = "Месяц начисления"
+VAT_COL_OBJECT = "Направление"
+VAT_COL_VAT    = "НДС"
+
+# Файлы НДС лежат в TEMP_VAT_DIR, имя любое, но:
+#   - расширение .xlsx
+#   - в имени есть слово "ндс" (без учёта регистра)
+VAT_FILE_SUFFIX  = ".xlsx"
+VAT_FILE_KEYWORD = "ндс"
+
+# Правила вычитания НДС для отдельных блоков.
+# НДС(блок) = НДС(агрегат) − НДС(вычитаемые объекты).
+#
+# Для блока «Коммерческие помещения LV без Матиса и Эспорта»:
+# в БДиР справочная строка даёт НДС по «Коммерческие помещения LV»
+# (это агрегат), из которого нужно вычесть Матису и Эспорту.
+#
+# Для «Estate EU» и «Baku-Nomiqa и Dibai-Nomiqa» справочная строка
+# содержит уже готовую сумму — берём её целиком, ничего не вычитаем.
+VAT_SPECIAL_BLOCKS = {
+    "Коммерческие помещения LV без Матиса и Эспорта": {
+        "aggregate": "Коммерческие помещения LV",
+        "subtract": [
+            "M81 - Matisa 81",
+            "EKS_Esporta iela 12-113",
+        ],
+    },
+    "Estate EU": {
+        "aggregate": "Estate EU",
+        "subtract": [],
+    },
+    "Baku-Nomiqa и Dibai-Nomiqa": {
+        "aggregate": "Baku-Nomiqa и Dibai-Nomiqa",
+        "subtract": [],
+    },
+}
+
 
 DIRECTIONS          = ["Латвия", "Европа", "Estate_AZE", "Nomiqa", "UK_Estate", "Unelma"]
 DIRECTIONS_BDR      = ["Латвия", "Европа", "Estate_AZE", "Nomiqa", "UK_Estate", "Unelma"]
@@ -284,6 +353,7 @@ def check_inputs(template_name):
         "opiu_cur":  [],
         "bdr":       [],
         "forecast":  [],
+        "vat":       [],
     }
 
     tpl = TEMPLATE_FILES[template_name]
@@ -307,6 +377,20 @@ def check_inputs(template_name):
         p = FORECAST_FILES.get(d)
         if p and not p.exists():
             missing["forecast"].append(p)
+
+    # НДС: файлы необязательны, но если их нет в папке —
+    # предупреждаем (не блокируем сборку).
+    try:
+        vat_files = [
+            f for f in os.listdir(TEMP_VAT_DIR)
+            if f.lower().endswith(VAT_FILE_SUFFIX)
+            and VAT_FILE_KEYWORD.lower() in f.lower()
+            and not f.startswith("~$")
+        ]
+        if not vat_files:
+            missing["vat"].append(TEMP_VAT_DIR / "(нет файлов НДС)")
+    except Exception:
+        missing["vat"].append(TEMP_VAT_DIR / "(нет файлов НДС)")
 
     return missing
 

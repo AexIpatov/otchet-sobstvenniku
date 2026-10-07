@@ -643,3 +643,412 @@ def parse_investments(path):
             result[name] = val
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# НДС: файлы «НДС ММ.ГГГГ <Статья>.xlsx» и справочная строка БДиР/Прогнозов
+# ---------------------------------------------------------------------------
+
+def _read_month_cell(value):
+    """
+    Приводит значение ячейки «Месяц начисления» к tuple (год, месяц).
+    Понимает:
+      - datetime / date из openpyxl;
+      - строки "09.2026", "9.2026", "2026-09";
+      - "сентябрь 2026".
+    Возвращает (year, month) или None.
+    """
+    import datetime as _dt
+
+    if value is None:
+        return None
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        return (value.year, value.month)
+
+    s = str(value).strip()
+    if s == "":
+        return None
+
+    # "09.2026" или "9.2026"
+    m = re.match(r"^(\d{1,2})[./\-](\d{4})$", s)
+    if m:
+        month, year = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12:
+            return (year, month)
+        return None
+
+    # "2026-09" или "2026.09"
+    m = re.match(r"^(\d{4})[./\-](\d{1,2})$", s)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12:
+            return (year, month)
+        return None
+
+    # "сентябрь 2026"
+    _ru = {
+        "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
+        "ма": 5, "июн": 6, "июл": 7, "август": 8,
+        "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+    }
+    low = s.lower()
+    for pref, num in _ru.items():
+        if pref in low:
+            my = re.search(r"(\d{4})", low)
+            if my:
+                return (int(my.group(1)), num)
+    return None
+
+
+def _parse_vat_file(path, target_year, target_month, wanted_objects):
+    """
+    Читает один файл НДС. Возвращает {'НДС': float, 'с_НДС': float}
+    только по строкам, совпавшим с месяцем и направлением.
+    """
+    result = {"НДС": 0.0, "с_НДС": 0.0}
+
+    if not path or not os.path.exists(path):
+        return result
+
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception as e:
+        print(f"[WARN] [vat] не открыть {path}: {e}")
+        return result
+
+    if config.VAT_SHEET_NAME in wb.sheetnames:
+        ws = wb[config.VAT_SHEET_NAME]
+    else:
+        ws = wb.active
+
+    needed = {
+        _normalize(config.VAT_COL_MONTH),
+        _normalize(config.VAT_COL_OBJECT),
+        _normalize(config.VAT_COL_VAT),
+    }
+    needed.discard("")
+
+    # Ищем шапку в первых 20 строках: должна содержать
+    # минимум 2 из нужных колонок.
+    header_row = None
+    header_map = {}
+    for r in range(1, min(ws.max_row, 20) + 1):
+        cur = {}
+        for c in range(1, min(ws.max_column, 30) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            nv = _normalize(v)
+            if nv:
+                cur[nv] = c
+        if sum(1 for k in needed if k in cur) >= 2:
+            header_row = r
+            header_map = cur
+            break
+
+    if header_row is None:
+        print(f"[WARN] [vat] {os.path.basename(path)}: шапка не найдена")
+        return result
+
+    c_month  = header_map.get(_normalize(config.VAT_COL_MONTH))
+    c_object = header_map.get(_normalize(config.VAT_COL_OBJECT))
+    c_vat    = header_map.get(_normalize(config.VAT_COL_VAT))
+    c_sumvat = header_map.get(_normalize("Сумма с НДС"))
+
+    if c_month is None or c_object is None or c_vat is None:
+        print(f"[WARN] [vat] {os.path.basename(path)}: нет колонок "
+              f"Месяц/Направление/НДС")
+        return result
+
+    for r in range(header_row + 1, ws.max_row + 1):
+        ym = _read_month_cell(ws.cell(row=r, column=c_month).value)
+        if ym != (target_year, target_month):
+            continue
+
+        obj_val = ws.cell(row=r, column=c_object).value
+        if obj_val is None:
+            continue
+        obj_norm = _normalize(obj_val)
+
+        if wanted_objects and obj_norm not in wanted_objects:
+            continue
+
+        result["НДС"]   += _cell_value(ws, r, c_vat - 1)
+        if c_sumvat is not None:
+            result["с_НДС"] += _cell_value(ws, r, c_sumvat - 1)
+
+    return result
+
+
+def parse_vat(folder, year, month, object_names):
+    """
+    Читает ВСЕ файлы НДС из папки, складывает НДС по строкам,
+    подходящим по месяцу и объектам.
+
+    Возвращает {'НДС': float, 'с_НДС': float}.
+    """
+    total = {"НДС": 0.0, "с_НДС": 0.0}
+
+    if not folder or not os.path.isdir(folder):
+        return total
+
+    wanted = set()
+    for obj in (object_names or []):
+        clean = str(obj).split(" [")[0].strip()
+        if clean:
+            wanted.add(_normalize(clean))
+
+    files = []
+    for f in os.listdir(folder):
+        if f.startswith("~$"):
+            continue
+        if not f.lower().endswith(config.VAT_FILE_SUFFIX):
+            continue
+        if config.VAT_FILE_KEYWORD.lower() not in f.lower():
+            continue
+        files.append(os.path.join(folder, f))
+
+    for p in files:
+        part = _parse_vat_file(p, year, month, wanted)
+        total["НДС"]   += part["НДС"]
+        total["с_НДС"] += part["с_НДС"]
+
+    if config.DEBUG:
+        print(f"[vat] {year}-{month:02d}: НДС={total['НДС']:.2f}, "
+              f"с_НДС={total['с_НДС']:.2f}")
+    return total
+
+
+def _month_by_name(name):
+    """
+    Определяет номер месяца (1..12) по названию.
+    Поддерживает русский и английский.
+    """
+    if name is None:
+        return None
+    low = str(name).strip().lower()
+
+    ru = {
+        "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
+        "май": 5, "мая": 5, "июн": 6, "июл": 7, "август": 8,
+        "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+    }
+    for pref, num in ru.items():
+        if pref in low:
+            return num
+
+    en = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    for pref, num in en.items():
+        if pref in low:
+            return num
+    return None
+
+
+def _pick_month_column(ws, anchor_row, month):
+    """
+    Определяет индекс (1-based) колонки данных для нужного месяца.
+
+    Ищет в таком порядке:
+      1. В строках 1..6 листа — значения типа datetime (в Прогнозах
+         даты обычно в строке 2).
+      2. Если не нашли — в строках 1..6 листа ищем ТЕКСТОВЫЕ названия
+         месяцев ("Сентябрь 2026", "September 2026") — это формат БДиР.
+      3. Если не нашли — в диапазоне (anchor_row - 10 .. anchor_row)
+         ищем datetime (страховка на случай нестандартного файла).
+    """
+    import datetime as _dt
+
+    # 1) datetime в первых 6 строках
+    for r in range(1, min(ws.max_row, 6) + 1):
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if isinstance(v, (_dt.datetime, _dt.date)) and v.month == month:
+                return c
+
+    # 2) Текстовое название месяца в первых 6 строках
+    for r in range(1, min(ws.max_row, 6) + 1):
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            if isinstance(v, (_dt.datetime, _dt.date)):
+                continue
+            if _month_by_name(v) == month:
+                return c
+
+    # 3) datetime в диапазоне над якорем (страховка)
+    for r in range(max(1, anchor_row - 10), anchor_row):
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if isinstance(v, (_dt.datetime, _dt.date)) and v.month == month:
+                return c
+
+    return None
+
+
+def _parse_vat_ref_from_file(path, sheet_name, month,
+                             wanted_objects=None, subtract_objects=None):
+    """
+    Универсальный парсер строки «Справочно по НДС выручки:» из БДиР
+    или Прогнозов.
+
+    Если subtract_objects задан — берём агрегат и вычитаем из него
+    указанные объекты.
+    """
+    if not path or not os.path.exists(path):
+        return None
+
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception as e:
+        print(f"[WARN] [vat_ref] не открыть {path}: {e}")
+        return None
+
+    if sheet_name:
+        if sheet_name not in wb.sheetnames:
+            return None
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active
+
+    # Якорь «Справочно по НДС выручки:» может находиться
+    # в колонке A (БДиР) или в колонке B (некоторые Прогнозы).
+    # Ищем сразу в первых двух колонках.
+    anchor_row = None
+    anchor_col = None
+    anchor_norm = _normalize(config.VAT_REF_ROW_TITLE)
+    for r in range(1, ws.max_row + 1):
+        for c in (1, 2):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            if _normalize(v) == anchor_norm:
+                anchor_row = r
+                anchor_col = c
+                break
+        if anchor_row is not None:
+            break
+    if anchor_row is None:
+        return None
+
+    col_idx = _pick_month_column(ws, anchor_row, month)
+    if col_idx is None:
+        return None
+
+    # ============================================================
+    # Логика парсинга справочной строки НДС:
+    #
+    # 1) Сначала читаем значение из САМОЙ строки-якоря
+    #    (в Прогнозах месячных объекты под якорем НЕ перечислены —
+    #    там стоит одно число на весь лист).
+    #
+    # 2) Если под якорем всё-таки есть строки с объектами
+    #    (в БДиР они есть), используем их по старой логике:
+    #    - для простых блоков суммируем значения по wanted_objects;
+    #    - для специальных блоков берём агрегат и вычитаем subtract.
+    # ============================================================
+
+    anchor_value = _cell_value(ws, anchor_row, col_idx - 1)
+
+    wanted_norm = set()
+    for o in (wanted_objects or []):
+        clean = str(o).split(" [")[0].strip()
+        if clean:
+            wanted_norm.add(_normalize(clean).replace(" ", ""))
+
+    aggregate_name = None
+    subtract_list  = []
+    if isinstance(subtract_objects, dict):
+        aggregate_name = subtract_objects.get("aggregate")
+        subtract_list  = subtract_objects.get("subtract", []) or []
+
+    aggregate_norm = _normalize(aggregate_name) if aggregate_name else None
+    subtract_norm  = {_normalize(x) for x in subtract_list}
+
+    aggregate_value = None
+    subtract_sum = 0.0
+    found_objects_under_anchor = False
+
+    for r in range(anchor_row + 1, ws.max_row + 1):
+        v = ws.cell(row=r, column=anchor_col).value
+        if v is None:
+            continue
+        name_norm = _normalize(v)
+
+        if not name_norm:
+            continue
+        if name_norm == anchor_norm:
+            break
+
+        val = _cell_value(ws, r, col_idx - 1)
+
+        name_norm_ns = name_norm.replace(" ", "")
+        aggregate_norm_ns = aggregate_norm.replace(" ", "") if aggregate_norm else None
+        subtract_norm_ns = {x.replace(" ", "") for x in subtract_norm}
+
+        if aggregate_norm_ns and name_norm_ns == aggregate_norm_ns:
+            aggregate_value = val
+            found_objects_under_anchor = True
+        elif name_norm_ns in subtract_norm_ns:
+            subtract_sum += val
+            found_objects_under_anchor = True
+        elif not aggregate_norm_ns and name_norm_ns in wanted_norm:
+            if aggregate_value is None:
+                aggregate_value = 0.0
+            aggregate_value += val
+            found_objects_under_anchor = True
+
+    # --- Если под якорем были объекты (БДиР) — используем старую логику ---
+    if found_objects_under_anchor:
+        if aggregate_norm:
+            if aggregate_value is None:
+                return None
+            return aggregate_value - subtract_sum
+        return aggregate_value
+
+    # --- Если под якорем объектов НЕ было (Прогнозы) — берём значение
+    #     из самой строки-якоря. Это одно число на весь лист.
+    return anchor_value
+
+
+def parse_vat_ref_bdr(path, month, block_name, objects_for_block):
+    """
+    НДС из БДиР для указанного блока и месяца.
+    Учитывает специальные правила вычитания.
+    """
+    spec = config.VAT_SPECIAL_BLOCKS.get(block_name)
+    if spec:
+        return _parse_vat_ref_from_file(
+            path, None, month,
+            subtract_objects={
+                "aggregate": spec["aggregate"],
+                "subtract":  spec["subtract"],
+            },
+        )
+    return _parse_vat_ref_from_file(
+        path, None, month,
+        wanted_objects=objects_for_block,
+    )
+
+
+def parse_vat_ref_forecast(path, sheet_name, month, block_name, objects_for_block):
+    """
+    НДС из Прогнозов месячных для указанного блока и месяца.
+    Учитывает специальные правила вычитания.
+    """
+    spec = config.VAT_SPECIAL_BLOCKS.get(block_name)
+    if spec:
+        return _parse_vat_ref_from_file(
+            path, sheet_name, month,
+            subtract_objects={
+                "aggregate": spec["aggregate"],
+                "subtract":  spec["subtract"],
+            },
+        )
+    return _parse_vat_ref_from_file(
+        path, sheet_name, month,
+        wanted_objects=objects_for_block,
+    )
