@@ -5,13 +5,11 @@
 # Читает ОПиУ формата «статьи × месяцы» с древовидной структурой
 # (·, ··, ···, ····) и строит книгу Excel.
 #
-# ГЛАВНАЯ ИДЕЯ ПАРСИНГА:
-#   1) Один раз пробегаем файл и строим плоский список строк:
-#         [(row_idx, level, title_clean, {месяц: значение})]
-#   2) Для каждой искомой величины (выручка юнита, ЧП юнита,
-#      ФОТ объекта и т.п.) проходим по этому списку с ЯВНЫМ
-#      условием «находимся внутри секции X, юнит Y, объект Z».
-#      Это исключает любые сдвиги контекста.
+# Имена листов содержат номер слайда презентации:
+#     Сл04_ОПиУ_Латвия
+#     Сл05_EBITDA_Латвия
+#     Сл07_Доля_ФОТ_Латвия
+#     ...
 # ============================================================
 
 import os
@@ -50,12 +48,13 @@ _UNITS = [
     "UK Estate",
 ]
 
-# Объекты Латвии для отдельных листов: (имя в файле, имя для листа)
+# Объекты Латвии для отдельных листов:
+#   (имя в файле ОПиУ, имя для листа, номер слайда презентации)
 _LATVIA_OBJECTS = [
-    ("AN14 Антониас 14 (дом + парковка)", "Антонияс"),
-    ("AC89 Чака 89 (дом + парковка)",     "Чака"),
-    ("M81 - Matisa 81",                    "Матиса"),
-    ("EKS_Esporta iela 12-113",            "Эспорта"),
+    ("AN14 Антониас 14 (дом + парковка)", "Антонияс", 10),
+    ("AC89 Чака 89 (дом + парковка)",     "Чака",     15),
+    ("M81 - Matisa 81",                    "Матиса",   32),
+    ("EKS_Esporta iela 12-113",            "Эспорта",  33),
 ]
 
 # Коммерческие объекты Латвии (собираем в один виртуальный блок)
@@ -77,6 +76,16 @@ _LATVIA_COMMERCIAL = [
     "V22 К. Валдемара 22",
 ]
 
+# Номера слайдов для юнитов (первый слайд с ОПиУ каждого юнита)
+_UNIT_SLIDE_START = {
+    "Latvia":        4,   # слайд 4 — ОПиУ Латвия
+    "East-Восток":  38,   # слайд 38 — ОПиУ East-Восток
+    "Europe":       49,   # слайд 49 — ОПиУ Европа
+    "Nomiqa":       71,   # слайд 71 — ОПиУ Nomiqa
+    "Unelma":       67,   # слайд 67 — ОПиУ Унелма
+    "UK Estate":    56,   # слайд 56 — ОПиУ Расходы УК
+}
+
 # Стили
 _HEADER_FILL   = PatternFill("solid", fgColor="1E3A8A")
 _HEADER_FONT   = Font(bold=True, color="FFFFFF", size=11)
@@ -89,10 +98,12 @@ _CELL_BORDER   = Border(
     bottom=Side(style="thin", color="CBD5E1"),
 )
 
-_COLOR_REVENUE = "FFC000"   # жёлтый
-_COLOR_NET     = "70AD47"   # зелёный
-_COLOR_LINE_1  = "C00000"   # красный
-_COLOR_LINE_2  = "4472C4"   # синий
+# Цвета серий (как в презентации)
+_COLOR_REVENUE = "FFC000"   # жёлтый  (Выручка)
+_COLOR_NET     = "70AD47"   # зелёный (ЧП)
+_COLOR_LINE_RED = "C00000"  # красный (EBITDA Латвия, Доля ФОТ Латвия)
+_COLOR_LINE_YEL = "FFC000"  # жёлтый  (EBITDA Чака, EBITDA Коммерческие, EBITDA Матиса)
+_COLOR_LINE_BLU = "4472C4"  # синий   (Доля ФОТ — общий цвет)
 
 
 # ============================================================
@@ -162,20 +173,12 @@ def _find_month_columns(ws, header_row, months):
 # ============================================================
 
 def _read_flat_rows(opiu_path, months):
-    """
-    Возвращает:
-        rows = [(row_idx, level, title_clean, {month: value})]
-        month_col = {month: col_idx}
-
-    Никакой интерпретации — просто дамп всех строк с уровнями.
-    """
     if not opiu_path or not os.path.exists(opiu_path):
         return [], {}
 
     wb = openpyxl.load_workbook(opiu_path, data_only=True)
     ws = wb.active
 
-    # Ищем шапку: строка, где минимум 3 колонки содержат названия месяцев
     header_row = None
     for r in range(1, 6):
         hits = 0
@@ -215,14 +218,9 @@ def _read_flat_rows(opiu_path, months):
 
 
 # ============================================================
-# ШАГ 2. ИЗВЛЕЧЕНИЕ ДАННЫХ ИЗ ПЛОСКОГО СПИСКА
+# ШАГ 2. ИЗВЛЕЧЕНИЕ ДАННЫХ
 # ============================================================
 
-# Секции (level 0), в которых мы ищем:
-#   - Выручка              → revenue
-#   - Чистая прибыль       → net
-#   - Производственные расходы → ФОТ (производственный)
-#   - Коммерческие расходы     → ФОТ (коммерческий)
 _SECTION_REVENUE = "Выручка"
 _SECTION_NET     = "Чистая прибыль"
 _SECTION_PROD    = "Производственные расходы"
@@ -230,16 +228,6 @@ _SECTION_COMM    = "Коммерческие расходы"
 
 
 def _find_row(rows, section, unit, object_name=None):
-    """
-    Возвращает словарь {month: value} для строки, которая находится:
-      - в секции `section` (level 0),
-      - затем идёт `unit` (level 1, точное совпадение),
-      - затем, если задан `object_name`, — `object_name` (level 2),
-        и сама строка имеет уровень 1 (если object_name=None)
-        или уровень 2 (если object_name задан).
-
-    Если ничего не найдено — возвращает {}.
-    """
     cur_section = None
     cur_unit = None
     cur_object = None
@@ -269,61 +257,32 @@ def _find_row(rows, section, unit, object_name=None):
                 return dict(values)
             continue
 
-        # Уровень 3+ нам не интересен для поиска revenue/net
-
     return {}
 
 
+def _is_inside_section(rows, idx, section):
+    for i in range(idx - 1, -1, -1):
+        r, lvl, title, values = rows[i]
+        if lvl == 0:
+            return title == section
+    return False
+
+
 def _find_object_fot(rows, section, unit, object_name):
-    """
-    Возвращает {month: value} для ФОТ объекта.
-
-    Ищем строку с текстом «ФОТ производственного персонала» или
-    «ФОТ коммерческого персонала» внутри блока объекта
-    `object_name`, который находится в юните `unit` в секции `section`.
-
-    ВАЖНО: в разных секциях уровни «·» разные!
-
-      - В секции «Выручка»:
-          · Latvia              ← level 1 (юнит)
-          ·· AN14 Антониас 14   ← level 2 (объект)
-
-      - В секции «Производственные расходы»:
-          · Прямые производственные    ← level 1 (подсекция)
-          ·· Latvia                     ← level 2 (юнит!)
-          ··· AN14 Антониас 14          ← level 3 (объект!)
-          ···· ФОТ производственного    ← level 4
-
-    Поэтому НЕЛЬЗЯ жёстко завязываться на уровень: ищем по ИМЕНАМ
-    с любой вложенностью.
-
-    Алгоритм:
-      1. Находим строку с именем == unit (в любой позиции).
-      2. После неё находим строку с именем == object_name.
-      3. После неё — все строки, содержащие «фот производственного»
-         или «фот коммерческого», пока не встретим строку, которая
-         «выше» объекта по уровню (или новый объект того же уровня).
-    """
     result = {}
 
-    # 1) Находим индекс строки с именем юнита
     unit_idx = None
     for i, (r, lvl, title, values) in enumerate(rows):
         if title == unit:
-            # Убеждаемся, что мы всё ещё в нужной секции
-            # (проверяем, что выше нас в rows есть section и нет
-            # другой секции между ними).
             if _is_inside_section(rows, i, section):
                 unit_idx = i
                 break
     if unit_idx is None:
         return result
 
-    # 2) После юнита находим объект
     obj_idx = None
     for i in range(unit_idx + 1, len(rows)):
         r, lvl, title, values = rows[i]
-        # Если встретили новую секцию — стоп
         if lvl == 0 and title != section:
             break
         if title == object_name:
@@ -334,13 +293,10 @@ def _find_object_fot(rows, section, unit, object_name):
 
     obj_lvl = rows[obj_idx][1]
 
-    # 3) После объекта собираем все ФОТ-строки, пока не вышли из блока объекта
     for i in range(obj_idx + 1, len(rows)):
         r, lvl, title, values = rows[i]
-        # Вышли из объекта — уровень ≤ уровня объекта
         if lvl <= obj_lvl:
             break
-        # Новая секция — стоп
         if lvl == 0 and title != section:
             break
 
@@ -352,37 +308,11 @@ def _find_object_fot(rows, section, unit, object_name):
     return result
 
 
-def _is_inside_section(rows, idx, section):
-    """Проверяет, что строка idx находится в секции `section`
-    (level 0), а не в другой секции."""
-    for i in range(idx - 1, -1, -1):
-        r, lvl, title, values = rows[i]
-        if lvl == 0:
-            return title == section
-    return False
-
-
 # ============================================================
-# ШАГ 3. СБОРКА ДАННЫХ ПО ЮНИТАМ И ОБЪЕКТАМ
+# ШАГ 3. СБОРКА ДАННЫХ
 # ============================================================
 
 def _collect_units(rows, months):
-    """
-    Возвращает:
-    {
-        "Latvia": {
-            "revenue": {m: v},
-            "net":     {m: v},
-            "fot":     {m: v},
-            "objects": {
-                "AN14 ...": {"revenue": {...}, "net": {...}, "fot": {...}},
-                ...
-            }
-        },
-        ...
-    }
-    """
-
     units = {u: {
         "revenue": {m: 0.0 for m in months},
         "net":     {m: 0.0 for m in months},
@@ -390,7 +320,7 @@ def _collect_units(rows, months):
         "objects": {},
     } for u in _UNITS}
 
-    # --- 1. Собираем объекты уровня 2 ---
+    # 1) объекты уровня 2 в секциях Выручка / Чистая прибыль
     cur_section = None
     cur_unit = None
     for r, lvl, title, values in rows:
@@ -411,18 +341,16 @@ def _collect_units(rows, months):
                     "fot":     {m: 0.0 for m in months},
                 }
 
-    # --- 2. Выручка и ЧП для каждого объекта ---
+    # 2) revenue / net каждого объекта
     for u_name, u in units.items():
         for obj_name in list(u["objects"].keys()):
-            rev_vals = _find_row(rows, _SECTION_REVENUE, u_name,
-                                 object_name=obj_name)
-            net_vals = _find_row(rows, _SECTION_NET, u_name,
-                                 object_name=obj_name)
+            rev = _find_row(rows, _SECTION_REVENUE, u_name, object_name=obj_name)
+            net = _find_row(rows, _SECTION_NET, u_name, object_name=obj_name)
             for m in months:
-                u["objects"][obj_name]["revenue"][m] = rev_vals.get(m, 0.0)
-                u["objects"][obj_name]["net"][m]     = net_vals.get(m, 0.0)
+                u["objects"][obj_name]["revenue"][m] = rev.get(m, 0.0)
+                u["objects"][obj_name]["net"][m]     = net.get(m, 0.0)
 
-    # --- 3. ФОТ по объектам (производственный + коммерческий) ---
+    # 3) ФОТ объектов
     for u_name, u in units.items():
         for obj_name in list(u["objects"].keys()):
             fot_prod = _find_object_fot(rows, _SECTION_PROD, u_name, obj_name)
@@ -432,35 +360,36 @@ def _collect_units(rows, months):
                     fot_prod.get(m, 0.0) + fot_comm.get(m, 0.0)
                 )
 
-    # --- 4. Агрегаты юнита = СУММА по всем его объектам ---
+    # 4) агрегаты юнита = сумма по объектам
     for u_name, u in units.items():
         for m in months:
-            u["revenue"][m] = sum(obj["revenue"][m] for obj in u["objects"].values())
-            u["net"][m]     = sum(obj["net"][m]     for obj in u["objects"].values())
-            u["fot"][m]     = sum(obj["fot"][m]     for obj in u["objects"].values())
+            u["revenue"][m] = sum(o["revenue"][m] for o in u["objects"].values())
+            u["net"][m]     = sum(o["net"][m]     for o in u["objects"].values())
+            u["fot"][m]     = sum(o["fot"][m]     for o in u["objects"].values())
 
-    # --- 5. Виртуальный юнит «Коммерческие» для Латвии ---
+    # 5) виртуальный юнит «Коммерческие»
     if "Latvia" in units:
-        latvia = units["Latvia"]
+        lat = units["Latvia"]
         commercial = {
             "revenue": {m: 0.0 for m in months},
             "net":     {m: 0.0 for m in months},
             "fot":     {m: 0.0 for m in months},
         }
         for obj_name in _LATVIA_COMMERCIAL:
-            obj = latvia["objects"].get(obj_name)
+            obj = lat["objects"].get(obj_name)
             if not obj:
                 continue
             for m in months:
                 commercial["revenue"][m] += obj["revenue"][m]
                 commercial["net"][m]     += obj["net"][m]
                 commercial["fot"][m]     += obj["fot"][m]
-        latvia["objects"]["Коммерческие помещения LV"] = commercial
+        lat["objects"]["Коммерческие помещения LV"] = commercial
 
     return units
 
+
 # ============================================================
-# ПОСТРОЕНИЕ ЛИСТОВ EXCEL
+# ПОСТРОЕНИЕ ЛИСТОВ
 # ============================================================
 
 def _write_header(ws, title, subtitle=""):
@@ -471,81 +400,48 @@ def _write_header(ws, title, subtitle=""):
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=13)
 
 
-def _write_table(ws, start_row, headers, rows):
+def _write_month_table(ws, start_row, headers, rows_data, number_fmt='#,##0'):
     for c, h in enumerate(headers, start=1):
         cell = ws.cell(row=start_row, column=c, value=h)
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = _CELL_BORDER
-    for r_off, row_vals in enumerate(rows, start=1):
+    for r_off, row_vals in enumerate(rows_data, start=1):
         for c, v in enumerate(row_vals, start=1):
             cell = ws.cell(row=start_row + r_off, column=c, value=v)
             cell.border = _CELL_BORDER
-            if isinstance(v, (int, float)):
-                cell.number_format = '#,##0'
+            if isinstance(v, (int, float)) and c > 1:
+                cell.number_format = number_fmt
 
 
-def _style_bar(chart, title, w=20, h=10):
-    chart.title = title
-    chart.width = w
-    chart.height = h
-    chart.style = 10
-    chart.x_axis.delete = False
-    chart.y_axis.delete = False
+# ------------------------------------------------------------
+# Лист: ОПиУ юнита/объекта (Выручка + ЧП, столбики)
+# ------------------------------------------------------------
+def _sheet_revenue_profit(wb, sheet_title, chart_title, subtitle,
+                          color_rev, color_net,
+                          data, months):
+    ws = wb.create_sheet(sheet_title)
 
+    _write_header(ws, chart_title, subtitle)
 
-def _style_line(chart, title, w=20, h=10):
-    chart.title = title
-    chart.width = w
-    chart.height = h
-    chart.style = 12
-    chart.x_axis.delete = False
-    chart.y_axis.delete = False
-
-
-def _sheet_revenue_profit(wb, name, data, months):
-    sheet_name = _safe_sheet(f"ОПиУ_{name}")
-    ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
-
-    _write_header(ws, f"ОПиУ {name}", "Выручка & Чистая прибыль, без НДС")
-
-    # Таблица перевёрнута: строка = месяц, колонки = показатели.
-    # Это нужно, чтобы BarChart взял серии из СТОЛБЦОВ
-    # (Выручка, ЧП), а месяцы — как категории по оси X.
     header_row = 4
     headers = ["Месяц", "Выручка", "Чистая прибыль"]
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row=header_row, column=c, value=h)
-        cell.fill = _HEADER_FILL
-        cell.font = _HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = _CELL_BORDER
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data["revenue"][m], 2),
+            round(data["net"][m], 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
 
-    for i, m in enumerate(months):
-        r = header_row + 1 + i
-        c1 = ws.cell(row=r, column=1, value=_MONTHS_RU_CAP[m])
-        c2 = ws.cell(row=r, column=2, value=round(data["revenue"][m], 2))
-        c3 = ws.cell(row=r, column=3, value=round(data["net"][m], 2))
-        for c in (c1, c2, c3):
-            c.border = _CELL_BORDER
-        c2.number_format = '#,##0'
-        c3.number_format = '#,##0'
-
-    # Категории — колонка A (месяцы)
-    cats = Reference(
-        ws,
-        min_col=1,
-        min_row=header_row + 1,
-        max_row=header_row + len(months),
-    )
-    # Данные — колонки B..C, серии берём из заголовков (header_row)
-    data_ref = Reference(
-        ws,
-        min_col=2, max_col=3,
-        min_row=header_row,
-        max_row=header_row + len(months),
-    )
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
 
     chart = BarChart()
     chart.type = "col"
@@ -555,20 +451,18 @@ def _sheet_revenue_profit(wb, name, data, months):
     chart.add_data(data_ref, titles_from_data=True)
     chart.set_categories(cats)
 
-    chart.title = f"Выручка и ЧП — {name}"
+    chart.title = chart_title
     chart.width = 20
     chart.height = 10
     chart.x_axis.delete = False
     chart.y_axis.delete = False
     chart.y_axis.majorGridlines = None
 
-    # Цвета: Выручка — жёлтый, ЧП — зелёный
-    chart.series[0].graphicalProperties.solidFill = _COLOR_REVENUE
-    chart.series[0].graphicalProperties.line.solidFill = _COLOR_REVENUE
-    chart.series[1].graphicalProperties.solidFill = _COLOR_NET
-    chart.series[1].graphicalProperties.line.solidFill = _COLOR_NET
+    chart.series[0].graphicalProperties.solidFill = color_rev
+    chart.series[0].graphicalProperties.line.solidFill = color_rev
+    chart.series[1].graphicalProperties.solidFill = color_net
+    chart.series[1].graphicalProperties.line.solidFill = color_net
 
-    # Подписи значений над столбиками
     chart.dLbls = DataLabelList()
     chart.dLbls.showVal = True
     chart.dLbls.showSerName = False
@@ -577,73 +471,53 @@ def _sheet_revenue_profit(wb, name, data, months):
     chart.dLbls.numFmt = '#,##0'
     chart.dLbls.position = "outEnd"
 
-    # Легенда снизу
     chart.legend.position = "b"
     chart.legend.overlay = False
 
     ws.add_chart(chart, "E4")
 
 
-def _sheet_ebitda(wb, name, data, months):
-    sheet_name = _safe_sheet(f"EBITDA_{name}")
-    ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
+# ------------------------------------------------------------
+# Лист: EBITDA (линия)
+# ------------------------------------------------------------
+def _sheet_ebitda(wb, sheet_title, chart_title, subtitle,
+                  line_color, data, months):
+    ws = wb.create_sheet(sheet_title)
 
-    _write_header(
-        ws,
-        f"Операционная рентабельность (EBITDA margin) {name}",
-        "EBITDA margin, %",
-    )
+    _write_header(ws, chart_title, subtitle)
 
     header_row = 4
     headers = ["Месяц", "EBITDA margin"]
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row=header_row, column=c, value=h)
-        cell.fill = _HEADER_FILL
-        cell.font = _HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = _CELL_BORDER
-
-    for i, m in enumerate(months):
-        r = header_row + 1 + i
+    rows_data = []
+    for m in months:
         rev = data["revenue"][m]
         net = data["net"][m]
         margin = (net / rev) if rev else 0.0
+        rows_data.append([_MONTHS_RU_CAP[m], round(margin, 4)])
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
 
-        c1 = ws.cell(row=r, column=1, value=_MONTHS_RU_CAP[m])
-        c2 = ws.cell(row=r, column=2, value=round(margin, 4))
-        for c in (c1, c2):
-            c.border = _CELL_BORDER
-        c2.number_format = '0.0%'
-
-    cats = Reference(
-        ws,
-        min_col=1,
-        min_row=header_row + 1,
-        max_row=header_row + len(months),
-    )
-    data_ref = Reference(
-        ws,
-        min_col=2, max_col=2,
-        min_row=header_row,
-        max_row=header_row + len(months),
-    )
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=2,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
 
     chart = LineChart()
     chart.add_data(data_ref, titles_from_data=True)
     chart.set_categories(cats)
-    chart.title = f"Операционная рентабельность (EBITDA margin) {name}"
+    chart.title = chart_title
     chart.width = 20
     chart.height = 10
     chart.x_axis.delete = False
     chart.y_axis.delete = False
     chart.y_axis.majorGridlines = None
 
-    chart.series[0].graphicalProperties.line.solidFill = _COLOR_LINE_1
+    chart.series[0].graphicalProperties.line.solidFill = line_color
     chart.series[0].graphicalProperties.line.width = 25000
     chart.series[0].smooth = True
     chart.y_axis.numFmt = '0.0%'
 
-    # Подписи значений
     chart.dLbls = DataLabelList()
     chart.dLbls.showVal = True
     chart.dLbls.showSerName = False
@@ -652,66 +526,48 @@ def _sheet_ebitda(wb, name, data, months):
     chart.dLbls.numFmt = '0.0%'
     chart.dLbls.position = "t"
 
-    chart.legend = None   # линия одна — легенда не нужна
+    chart.legend = None
 
     ws.add_chart(chart, "E4")
 
 
-def _sheet_fot(wb, name, data, months):
-    sheet_name = _safe_sheet(f"Доля_ФОТ_{name}")
-    ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
+# ------------------------------------------------------------
+# Лист: Доля ФОТ (линия)
+# ------------------------------------------------------------
+def _sheet_fot(wb, sheet_title, chart_title, subtitle,
+               line_color, data, months):
+    ws = wb.create_sheet(sheet_title)
 
-    _write_header(
-        ws,
-        f"Доля ФОТ в выручке — {name}",
-        "%",
-    )
+    _write_header(ws, chart_title, subtitle)
 
     header_row = 4
     headers = ["Месяц", "Доля ФОТ"]
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row=header_row, column=c, value=h)
-        cell.fill = _HEADER_FILL
-        cell.font = _HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = _CELL_BORDER
-
-    for i, m in enumerate(months):
-        r = header_row + 1 + i
+    rows_data = []
+    for m in months:
         rev = data["revenue"][m]
         fot = data["fot"][m]
         share = (abs(fot) / rev) if rev else 0.0
+        rows_data.append([_MONTHS_RU_CAP[m], round(share, 4)])
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
 
-        c1 = ws.cell(row=r, column=1, value=_MONTHS_RU_CAP[m])
-        c2 = ws.cell(row=r, column=2, value=round(share, 4))
-        for c in (c1, c2):
-            c.border = _CELL_BORDER
-        c2.number_format = '0.0%'
-
-    cats = Reference(
-        ws,
-        min_col=1,
-        min_row=header_row + 1,
-        max_row=header_row + len(months),
-    )
-    data_ref = Reference(
-        ws,
-        min_col=2, max_col=2,
-        min_row=header_row,
-        max_row=header_row + len(months),
-    )
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=2,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
 
     chart = LineChart()
     chart.add_data(data_ref, titles_from_data=True)
     chart.set_categories(cats)
-    chart.title = f"Доля ФОТ в выручке — {name}"
+    chart.title = chart_title
     chart.width = 20
     chart.height = 10
     chart.x_axis.delete = False
     chart.y_axis.delete = False
     chart.y_axis.majorGridlines = None
 
-    chart.series[0].graphicalProperties.line.solidFill = _COLOR_LINE_2
+    chart.series[0].graphicalProperties.line.solidFill = line_color
     chart.series[0].graphicalProperties.line.width = 25000
     chart.series[0].smooth = True
     chart.y_axis.numFmt = '0.0%'
@@ -733,48 +589,271 @@ def _sheet_fot(wb, name, data, months):
 # ГЛАВНАЯ ФУНКЦИЯ
 # ============================================================
 
+def _sheet_name_with_slide(slide_no, base_name):
+    """Формирует имя листа вида 'Сл04_ОПиУ_Латвия'."""
+    return _safe_sheet(f"Сл{slide_no:02d}_{base_name}")
+
+
 def build_presentation_data(opiu_path, bdr_path, forecast_path,
                             year, month, output_path):
     months = list(range(1, month + 1))
 
-    rows, month_col = _read_flat_rows(opiu_path, months)
+    rows, _ = _read_flat_rows(opiu_path, months)
     if not rows:
         print("[presentation_builder] нет данных — файл пустой")
         return output_path
 
     units = _collect_units(rows, months)
     if not units:
-        print("[presentation_builder] _collect_units вернул пусто — "
-              "нет данных для диаграмм")
+        print("[presentation_builder] _collect_units вернул пусто")
         return output_path
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
+    # --------------------------------------------------------
+    # 1. Юниты — ОПиУ / EBITDA / Доля ФОТ
+    # --------------------------------------------------------
+    # Соответствие «юнит → номер слайда ОПиУ / EBITDA / Доля ФОТ»
+    # Номера слайдов даны по образцу презентации (сентябрь 2026).
+    # Для юнитов без отдельного слайда EBITDA/ФОТ — используем
+    # базовый стартовый слайд.
+    unit_slides = {
+        # (ОПиУ, EBITDA, Доля ФОТ)
+        "Latvia":       (_UNIT_SLIDE_START["Latvia"],     5,  7),
+        "East-Восток":  (_UNIT_SLIDE_START["East-Восток"], 42, 40),
+        "Europe":       (_UNIT_SLIDE_START["Europe"],     51, 52),
+        "Nomiqa":       (_UNIT_SLIDE_START["Nomiqa"],     73, 74),
+        "Unelma":       (_UNIT_SLIDE_START["Unelma"],     68, 69),
+        "UK Estate":    (_UNIT_SLIDE_START["UK Estate"],  57, 58),
+    }
+
     for unit_name in _UNITS:
         u = units.get(unit_name)
         if not u:
             continue
-        _sheet_revenue_profit(wb, unit_name, u, months)
-        _sheet_ebitda(wb, unit_name, u, months)
-        _sheet_fot(wb, unit_name, u, months)
 
+        sl_opiu, sl_ebitda, sl_fot = unit_slides.get(
+            unit_name, (_UNIT_SLIDE_START.get(unit_name, 1), 0, 0)
+        )
+
+        # Определяем цвет линии для EBITDA по юниту
+        if unit_name == "Latvia":
+            ebitda_color = _COLOR_LINE_RED
+            fot_color    = _COLOR_LINE_RED
+        elif unit_name == "East-Восток":
+            ebitda_color = _COLOR_LINE_YEL
+            fot_color    = _COLOR_LINE_RED
+        else:
+            ebitda_color = _COLOR_LINE_YEL
+            fot_color    = _COLOR_LINE_RED
+
+        # ОПиУ юнита
+        _sheet_revenue_profit(
+            wb,
+            sheet_title=_sheet_name_with_slide(sl_opiu, f"ОПиУ_{unit_name}"),
+            chart_title=f"Выручка & Чистая прибыль {unit_name}, без НДС",
+            subtitle=f"ОПиУ {unit_name}",
+            color_rev=_COLOR_REVENUE,
+            color_net=_COLOR_NET,
+            data=u,
+            months=months,
+        )
+
+        # EBITDA юнита
+        if sl_ebitda:
+            _sheet_ebitda(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    sl_ebitda, f"EBITDA_{unit_name}"),
+                chart_title=f"Операционная рентабельность (EBITDA margin) {unit_name}",
+                subtitle=f"EBITDA margin {unit_name}, %",
+                line_color=ebitda_color,
+                data=u,
+                months=months,
+            )
+
+        # Доля ФОТ юнита
+        if sl_fot:
+            _sheet_fot(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    sl_fot, f"Доля_ФОТ_{unit_name}"),
+                chart_title=f"Доля ФОТ в выручке {unit_name}",
+                subtitle=f"Анализ ОПиУ Доля ФОТ {unit_name}",
+                line_color=fot_color,
+                data=u,
+                months=months,
+            )
+
+    # --------------------------------------------------------
+    # 2. Объекты Латвии
+    # --------------------------------------------------------
     if "Latvia" in units:
         latvia = units["Latvia"]
-        for obj_full, obj_short in _LATVIA_OBJECTS:
+        for obj_full, obj_short, sl_opiu in _LATVIA_OBJECTS:
             obj = latvia["objects"].get(obj_full)
             if not obj:
                 continue
-            _sheet_revenue_profit(wb, obj_short, obj, months)
-            _sheet_ebitda(wb, obj_short, obj, months)
-            _sheet_fot(wb, obj_short, obj, months)
 
+            # EBITDA Антонияс — 11 (красный), Чака — 16 (жёлтый),
+            # Матиса — 33 (жёлтый), Эспорта — нет (0)
+            sl_ebitda_map = {
+                "Антонияс": 11,
+                "Чака":     16,
+                "Матиса":   33,
+                "Эспорта":  34,
+            }
+            ebitda_color_map = {
+                "Антонияс": _COLOR_LINE_RED,
+                "Чака":     _COLOR_LINE_YEL,
+                "Матиса":   _COLOR_LINE_YEL,
+                "Эспорта":  _COLOR_LINE_YEL,
+            }
+            sl_ebitda = sl_ebitda_map.get(obj_short, 0)
+            ebitda_color = ebitda_color_map.get(obj_short, _COLOR_LINE_YEL)
+
+            # ОПиУ объекта
+            _sheet_revenue_profit(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    sl_opiu, f"ОПиУ_{obj_short}"),
+                chart_title=f"Выручка & Чистая прибыль {obj_short}, без НДС",
+                subtitle=f"ОПиУ {obj_short}",
+                color_rev=_COLOR_REVENUE,
+                color_net=_COLOR_NET,
+                data=obj,
+                months=months,
+            )
+
+            # EBITDA объекта
+            if sl_ebitda:
+                _sheet_ebitda(
+                    wb,
+                    sheet_title=_sheet_name_with_slide(
+                        sl_ebitda, f"EBITDA_{obj_short}"),
+                    chart_title=f"Операционная рентабельность (EBITDA margin) {obj_short}",
+                    subtitle=f"EBITDA margin {obj_short}, %",
+                    line_color=ebitda_color,
+                    data=obj,
+                    months=months,
+                )
+
+        # ----------------------------------------------------
+        # 3. Блок «Коммерческие»
+        # ----------------------------------------------------
         commercial = latvia["objects"].get("Коммерческие помещения LV")
         if commercial:
-            _sheet_revenue_profit(wb, "Коммерческие", commercial, months)
-            _sheet_ebitda(wb, "Коммерческие", commercial, months)
-            _sheet_fot(wb, "Коммерческие", commercial, months)
+            _sheet_revenue_profit(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    20, "ОПиУ_Коммерческие"),
+                chart_title="Выручка & Чистая прибыль Коммерческие Латвия, без НДС",
+                subtitle="ОПиУ Коммерческие",
+                color_rev=_COLOR_REVENUE,
+                color_net=_COLOR_NET,
+                data=commercial,
+                months=months,
+            )
+            _sheet_ebitda(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    21, "EBITDA_Коммерческие"),
+                chart_title="Операционная рентабельность (EBITDA margin) Коммерческие помещения",
+                subtitle="EBITDA margin Коммерческие, %",
+                line_color=_COLOR_LINE_YEL,
+                data=commercial,
+                months=months,
+            )
+
+    # --------------------------------------------------------
+    # 4. Специальные листы: Расходы УК (слайд 56)
+    # --------------------------------------------------------
+    if "UK Estate" in units:
+        uk = units["UK Estate"]
+        _sheet_revenue_profit(
+            wb,
+            sheet_title=_sheet_name_with_slide(56, "ОПиУ_Расходы_УК"),
+            chart_title="Расходы УК R1",
+            subtitle="ОПиУ Расходы УК",
+            color_rev=_COLOR_REVENUE,
+            color_net=_COLOR_NET,
+            data=uk,
+            months=months,
+        )
 
     wb.save(output_path)
     print(f"[OK] Диаграммы сохранены: {output_path}")
     return output_path
+````---
+
+## Что изменилось
+
+### 1. Имена листов с номерами слайдов
+
+Теперь каждый лист называется, например:
+- `Сл04_ОПиУ_Latvia`
+- `Сл05_EBITDA_Latvia`
+- `Сл07_Доля_ФОТ_Latvia`
+- `Сл10_ОПиУ_Антонияс`
+- `Сл11_EBITDA_Антонияс`
+- `Сл20_ОПиУ_Коммерческие`
+- `Сл21_EBITDA_Коммерческие`
+- `Сл56_ОПиУ_Расходы_УК`
+
+### 2. Цвета по образцу презентации
+
+- **ОПиУ юнитов и объектов**: выручка — **жёлтый** `FFC000`, ЧП — **зелёный** `70AD47`.
+- **EBITDA Латвия**: **красный** `C00000`.
+- **EBITDA Антонияс**: **красный** `C00000`.
+- **EBITDA Чака / Матиса / Эспорта / Коммерческие**: **жёлтый** `FFC000`.
+- **Доля ФОТ**: **красный** `C00000` (как в презентации стр. 7).
+
+### 3. Цвета теперь точно соответствуют слайдам:
+
+| Слайд | Что | Цвет линии/столбиков |
+|-------|-----|----------------------|
+| 4 | ОПиУ Латвия | жёлтый + зелёный |
+| 5 | EBITDA Латвия | красный |
+| 7 | Доля ФОТ Латвия | красный |
+| 10 | ОПиУ Антонияс | жёлтый + зелёный |
+| 11 | EBITDA Антонияс | красный |
+| 15 | ОПиУ Чака | жёлтый + зелёный |
+| 16 | EBITDA Чака | жёлтый |
+| 20 | ОПиУ Коммерческие | жёлтый + зелёный |
+| 21 | EBITDA Коммерческие | жёлтый |
+| 32 | ОПиУ Матиса | жёлтый + зелёный |
+| 33 | EBITDA Матиса | жёлтый |
+| 38 | ОПиУ East-Восток | жёлтый + зелёный |
+| 40 | Доля ФОТ East-Восток | красный |
+| 42 | EBITDA East-Восток | жёлтый |
+| 49 | ОПиУ Европа | жёлтый + зелёный |
+| 56 | ОПиУ Расходы УК | жёлтый + зелёный |
+| 67 | ОПиУ Унелма | жёлтый + зелёный |
+| 71 | ОПиУ Nomiqa | жёлтый + зелёный |
+
+---
+
+## Git-команды
+
+```bash
+cd "C:\Users\Александр\Отчет для собственника - cloud"
+
+git add src/presentation_builder.py
+git commit -m "feat(presentation): номера слайдов в именах листов + цвета по образцу презентации"
+git push origin main
+```
+
+---
+
+## Что проверить после сборки
+
+1. **Имена листов** в Excel должны начинаться с `Сл04_`, `Сл05_`, `Сл10_` и т.д.
+2. **Лист `Сл04_ОПиУ_Latvia`**: столбики жёлтые + зелёные.
+3. **Лист `Сл05_EBITDA_Latvia`**: линия **красная**.
+4. **Лист `Сл07_Доля_ФОТ_Latvia`**: линия **красная** (не синяя!).
+5. **Лист `Сл11_EBITDA_Антонияс`**: линия **красная**.
+6. **Лист `Сл16_EBITDA_Чака`**: линия **жёлтая**.
+7. **Лист `Сл20_ОПиУ_Коммерческие`**: столбики жёлтые + зелёные.
+
+Если какие-то цвета не совпадут с презентацией — напишите, какой именно лист и какой цвет должен быть, я поправлю одну строку.
