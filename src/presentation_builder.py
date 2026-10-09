@@ -1072,6 +1072,29 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                     months=months,
                 )
 
+                            # Нарастающий итог (слайд 9 для Латвии и т.д.)
+                sl_cumulative = {
+                    "Latvia":      9,
+                    "East-Восток": 43,
+                    "Europe":      52,
+                    "Nomiqa":      74,
+                    "Unelma":      69,
+                    "UK Estate":   60,
+                }.get(unit_name)
+
+                if sl_cumulative:
+                    _sheet_cumulative_plan_fact(
+                        wb,
+                        sheet_title=_sheet_name_with_slide(
+                            sl_cumulative, f"Итог_{unit_name}"),
+                        chart_title=f"Выполнение годового плана по чистой прибыли {unit_name}",
+                        data_plan=plan_vals,
+                        data_fact=u["net"],
+                        months=months,
+                        plan_label=f"ЧП {unit_name} план (с НДС)",
+                        fact_label=f"ЧП {unit_name} факт (с НДС)",
+                    )
+
     # --------------------------------------------------------
     # 2. Объекты Латвии
     # --------------------------------------------------------
@@ -1155,6 +1178,27 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                     months=months,
                 )
 
+                            # Нарастающий итог для объекта
+                sl_cumulative_obj = {
+                    "Антонияс": 13,
+                    "Чака":     18,
+                    "Матиса":   35,
+                    "Эспорта":  30,
+                }.get(obj_short)
+
+                if sl_cumulative_obj:
+                    _sheet_cumulative_plan_fact(
+                        wb,
+                        sheet_title=_sheet_name_with_slide(
+                            sl_cumulative_obj, f"Итог_{obj_short}"),
+                        chart_title=f"Выполнение годового плана по чистой прибыли {obj_short}",
+                        data_plan=plan_obj,
+                        data_fact=obj["net"],
+                        months=months,
+                        plan_label=f"ЧП {obj_short} план (с НДС)",
+                        fact_label=f"ЧП {obj_short} факт (с НДС)",
+                    )
+
         # ----------------------------------------------------
         # 3. Блок «Коммерческие»
         # ----------------------------------------------------
@@ -1206,6 +1250,18 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 data_plan=plan_comm,
                 data_fact=commercial["net"],
                 months=months,
+            )
+
+                        # Нарастающий итог для Коммерческих
+            _sheet_cumulative_plan_fact(
+                wb,
+                sheet_title=_sheet_name_with_slide(23, "Итог_Коммерческие"),
+                chart_title="Выполнение годового плана по чистой прибыли Коммерческие Латвия",
+                data_plan=plan_comm,
+                data_fact=commercial["net"],
+                months=months,
+                plan_label="ЧП Коммерческие план (с НДС)",
+                fact_label="ЧП Коммерческие факт (с НДС)",
             )
 
     # --------------------------------------------------------
@@ -1307,3 +1363,179 @@ def _sort_sheets_by_slide_number(wb):
               f"{[ws.title[:8] for ws in wb.worksheets]}")
     except Exception as e:
         print(f"[presentation_builder] не удалось отсортировать листы: {e}")
+
+# ============================================================
+# ЛИСТ «НАРАСТАЮЩИМ ИТОГОМ» (слайды 9, 13, 18, 23, 35, ...)
+# ============================================================
+
+# Цвета месяцев (приближены к PowerPoint)
+_MONTH_FILL = {
+    1: "4472C4",   # январь  — синий
+    2: "8FAADC",   # февраль — голубой
+    3: "FFC000",   # март    — жёлтый
+    4: "548235",   # апрель  — зелёный
+    5: "ED7D31",   # май     — оранжевый
+    6: "9DC3E6",   # июнь    — светло-голубой
+    7: "7030A0",   # июль    — фиолетовый
+    8: "BFB100",   # август  — оливковый
+    9: "2E4C99",   # сентябрь — тёмно-синий
+    10: "C55A11",
+    11: "375623",
+    12: "203864",
+}
+
+_TOTAL_BAR_COLUMNS = 100   # сколько узких столбцов используем для полос
+
+
+def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
+                                data_plan, data_fact, months,
+                                plan_label, fact_label):
+    """
+    Лист «Нарастающим итогом» — две строки цветных прямоугольников.
+    Ширина прямоугольника пропорциональна значению месяца.
+    Справа — итог плана, итог факта и % выполнения.
+    """
+    ws = wb.create_sheet(sheet_title)
+
+    # ---- 1. Заголовок ----
+    ws.cell(row=1, column=1, value=chart_title).font = Font(
+        bold=True, size=14, color="FFFFFF")
+    ws.cell(row=1, column=1).fill = PatternFill("solid", fgColor="2E75B6")
+    ws.cell(row=1, column=1).alignment = Alignment(
+        horizontal="center", vertical="center")
+    ws.merge_cells(start_row=1, start_column=1,
+                   end_row=1, end_column=_TOTAL_BAR_COLUMNS + 6)
+
+    # ---- 2. Легенда сверху ----
+    legend_row = 3
+    col_legend = 2
+    for m in months:
+        c1 = ws.cell(row=legend_row, column=col_legend)
+        c1.fill = PatternFill("solid", fgColor=_MONTH_FILL.get(m, "808080"))
+        c1.border = _CELL_BORDER
+        ws.merge_cells(start_row=legend_row, start_column=col_legend,
+                       end_row=legend_row, end_column=col_legend + 1)
+        c2 = ws.cell(row=legend_row, column=col_legend + 2,
+                     value=_MONTHS_RU_LOWER.get(m, "").capitalize())
+        c2.font = Font(size=9, color="FFFFFF")
+        c2.fill = PatternFill("solid", fgColor="2E75B6")
+        c2.alignment = Alignment(horizontal="left", vertical="center")
+        col_legend += 3
+
+    # ---- 3. Считаем ширины прямоугольников ----
+    total_plan = sum(data_plan.get(m, 0.0) for m in months) or 1.0
+    total_fact = sum(data_fact.get(m, 0.0) for m in months) or 1.0
+
+    plan_cols = {}
+    fact_cols = {}
+    for m in months:
+        p = data_plan.get(m, 0.0) or 0.0
+        f = data_fact.get(m, 0.0) or 0.0
+        plan_cols[m] = max(3, round(p / total_plan * _TOTAL_BAR_COLUMNS))
+        fact_cols[m] = max(3, round(f / total_fact * _TOTAL_BAR_COLUMNS))
+
+    # ---- 4. Строка «План» ----
+    plan_row = 5
+    ws.cell(row=plan_row, column=1, value=plan_label).font = Font(
+        size=11, color="FFFFFF")
+    ws.cell(row=plan_row, column=1).alignment = Alignment(
+        horizontal="left", vertical="center")
+
+    col = 2
+    for m in months:
+        width = plan_cols[m]
+        for c in range(col, col + width):
+            cell = ws.cell(row=plan_row, column=c)
+            cell.fill = PatternFill(
+                "solid", fgColor=_MONTH_FILL.get(m, "808080"))
+        mid = col + width // 2
+        vcell = ws.cell(row=plan_row, column=mid,
+                        value=round(data_plan.get(m, 0.0), 0))
+        vcell.font = Font(bold=True, size=10, color="FFFFFF")
+        vcell.alignment = Alignment(horizontal="center", vertical="center")
+        vcell.number_format = '#,##0'
+        col += width
+
+    # ---- 5. Строка «Факт» ----
+    fact_row = plan_row + 1
+    ws.cell(row=fact_row, column=1, value=fact_label).font = Font(
+        size=11, color="FFFFFF")
+    ws.cell(row=fact_row, column=1).alignment = Alignment(
+        horizontal="left", vertical="center")
+
+    col = 2
+    for m in months:
+        width = fact_cols[m]
+        for c in range(col, col + width):
+            cell = ws.cell(row=fact_row, column=c)
+            cell.fill = PatternFill(
+                "solid", fgColor=_MONTH_FILL.get(m, "808080"))
+        mid = col + width // 2
+        vcell = ws.cell(row=fact_row, column=mid,
+                        value=round(data_fact.get(m, 0.0), 0))
+        vcell.font = Font(bold=True, size=10, color="FFFFFF")
+        vcell.alignment = Alignment(horizontal="center", vertical="center")
+        vcell.number_format = '#,##0'
+        col += width
+
+    # ---- 6. Итоги справа ----
+    sum_col = 2 + _TOTAL_BAR_COLUMNS + 2
+
+    sum_plan = sum(data_plan.get(m, 0.0) for m in months)
+    sum_fact = sum(data_fact.get(m, 0.0) for m in months)
+    pct = (sum_fact / sum_plan) if sum_plan else 0.0
+
+    for r in range(plan_row, fact_row + 2):
+        c = ws.cell(row=r, column=sum_col)
+        c.fill = PatternFill("solid", fgColor="1F3864")
+        c.border = _CELL_BORDER
+
+    v = ws.cell(row=plan_row, column=sum_col, value=round(sum_plan, 0))
+    v.font = Font(bold=True, size=12, color="FFC000")
+    v.alignment = Alignment(horizontal="center", vertical="center")
+    v.number_format = '#,##0'
+
+    v = ws.cell(row=fact_row, column=sum_col, value=round(sum_fact, 0))
+    v.font = Font(bold=True, size=12, color="FFC000")
+    v.alignment = Alignment(horizontal="center", vertical="center")
+    v.number_format = '#,##0'
+
+    v = ws.cell(row=fact_row + 1, column=sum_col, value=round(pct, 4))
+    v.font = Font(bold=True, size=11, color="FFFFFF")
+    v.alignment = Alignment(horizontal="center", vertical="center")
+    v.number_format = '0.0%'
+
+    # ---- 7. Ось «Периоды» внизу ----
+    axis_row = fact_row + 3
+    ws.cell(row=axis_row, column=1, value="Периоды").font = Font(
+        size=10, color="FFFFFF")
+
+    max_val = max(sum_plan, sum_fact, 200000)
+    steps = 4
+    for i in range(steps + 1):
+        value = int(max_val * i / steps)
+        col_a = 2 + round(i / steps * (_TOTAL_BAR_COLUMNS - 1))
+        c = ws.cell(row=axis_row, column=col_a, value=value)
+        c.font = Font(size=9, color="FFFFFF")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.number_format = '#,##0'
+
+    # ---- 8. Ширина столбцов ----
+    ws.column_dimensions["A"].width = 30
+    for c in range(2, 2 + _TOTAL_BAR_COLUMNS):
+        col_letter = ws.cell(row=plan_row, column=c).column_letter
+        ws.column_dimensions[col_letter].width = 1.0
+    ws.column_dimensions[
+        ws.cell(row=plan_row, column=sum_col).column_letter].width = 14
+
+    # ---- 9. Тёмно-синий фон ----
+    bg = PatternFill("solid", fgColor="1F3864")
+    for r in range(1, axis_row + 2):
+        for c in range(1, sum_col + 2):
+            cell = ws.cell(row=r, column=c)
+            if cell.value is None:
+                cell.fill = bg
+
+    # Скрываем сетку Excel
+    ws.sheet_view.showGridLines = False
+    return ws
