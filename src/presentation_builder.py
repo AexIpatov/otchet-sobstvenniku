@@ -839,15 +839,23 @@ def _parse_odds_balance(odds_path, unit_name, months):
     Читает ОДДС-файл и возвращает:
       {
         "rows": [
-           {"name": "· AN14 …", "values": {1: 6027, ...}},
+           {"name": "AN14 Антониас 14 (дом + парковка)", "values": {...}},
            ...
            {"name": "ИТОГО", "values": {...}, "is_total": True},
         ]
       }
 
     unit_name — "Latvia" или "East-Восток".
-    Возвращает только строки, относящиеся к этому юниту,
-    плюс агрегатную строку «ИТОГО» для этого юнита.
+
+    ВАЖНО: для каждого объекта берём строку «·· Сальдо» (level 2),
+    которая лежит ВНУТРИ объекта. Например:
+
+      · AN14 Антониас 14 (дом + парковка)   ← level 1 — объект
+      ·· Поступления                         ← level 2
+      ··· 1.1.1 ...                          ← level 3
+      ·· Списания                            ← level 2
+      ··· 1.2.1 ...                          ← level 3
+      ·· Сальдо                              ← level 2 ← ЭТО то, что нужно
     """
     result = {"rows": []}
     if not odds_path or not os.path.exists(odds_path):
@@ -856,7 +864,7 @@ def _parse_odds_balance(odds_path, unit_name, months):
     wb = openpyxl.load_workbook(odds_path, data_only=True)
     ws = wb.active
 
-    # 1) Шапка: строка с «Направление / Январь 2026 / … / Сальдо»
+    # 1) Шапка
     header_row = None
     for r in range(1, 8):
         v = ws.cell(row=r, column=1).value
@@ -868,7 +876,7 @@ def _parse_odds_balance(odds_path, unit_name, months):
 
     month_col = _find_month_columns(ws, header_row, months)
 
-    # 2) Ищем строку с названием юнита (level 0, без «·»)
+    # 2) Ищем строку с названием юнита (level 0)
     unit_row = None
     for r in range(header_row + 1, ws.max_row + 1):
         raw = ws.cell(row=r, column=1).value
@@ -883,28 +891,27 @@ def _parse_odds_balance(odds_path, unit_name, months):
     if unit_row is None:
         return result
 
-    # 3) Собираем подстроки объекта (level 1, «· …»),
-    #    пока не началась другая секция уровня 0.
-    #    Отдельная задача — собрать саму строку «Сальдо по направлению»/«ИТОГО».
-    cur_object = None
-    objects = []  # список (name, values)
+    # 3) Идём по строкам после unit_row.
+    #    Для каждого объекта (level 1, НЕ «Сальдо»)
+    #    запоминаем имя и ищем дочернюю строку «·· Сальдо» (level 2).
+    objects = []
+    cur_object_name = None
+    cur_object_level = None
 
     for r in range(unit_row + 1, ws.max_row + 1):
         raw = ws.cell(row=r, column=1).value
         if raw is None:
-            # Пустая строка может содержать числа для предыдущего объекта —
-            # пропускаем: в ОДДС она содержит «-25233.39» без названия.
             continue
         title = _clean(raw)
         lvl = _level(raw)
 
-        # Дошли до следующего юнита (level 0) — стоп
+        # Дошли до следующего юнита — стоп
         if lvl == 0 and title != unit_name:
             break
 
-        # Объект (level 1)
+        # level 1 — либо объект, либо «Сальдо» юнита
         if lvl == 1:
-            # Если нашли «· Сальдо» — это агрегат, сохраняем отдельно
+            # Если нашли «Сальдо» уровня 1 — это итог юнита
             if title.lower() in ("сальдо", "итого",
                                  "сальдо по направлению"):
                 values = {m: _num(ws, r, col) for m, col in month_col.items()}
@@ -913,16 +920,42 @@ def _parse_odds_balance(odds_path, unit_name, months):
                     "values": values,
                     "is_total": True,
                 })
+                cur_object_name = None
                 continue
 
             # Иначе — новый объект
-            values = {m: _num(ws, r, col) for m, col in month_col.items()}
-            objects.append({"name": title, "values": values})
+            cur_object_name = title
+            cur_object_level = lvl
+            continue
+
+        # level 2 — проверяем, не «Сальдо» ли это внутри объекта
+        if lvl == 2 and cur_object_name is not None:
+            if title.lower() in ("сальдо", "итого"):
+                values = {m: _num(ws, r, col) for m, col in month_col.items()}
+                objects.append({
+                    "name": cur_object_name,
+                    "values": values,
+                })
+                cur_object_name = None
+                cur_object_level = None
+            continue
 
     # 4) Объекты — перед «ИТОГО»
-    for o in objects:
-        result["rows"].append(o)
+    rows_out = []
+    total_row = None
+    for row in result["rows"]:
+        if row.get("is_total"):
+            total_row = row
+        else:
+            rows_out.append(row)
 
+    for o in objects:
+        rows_out.append(o)
+
+    if total_row is not None:
+        rows_out.append(total_row)
+
+    result["rows"] = rows_out
     return result
 
 def build_presentation_data(opiu_path, bdr_path, forecast_path,
