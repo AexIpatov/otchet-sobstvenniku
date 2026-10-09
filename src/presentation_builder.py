@@ -593,6 +593,119 @@ def _sheet_name_with_slide(slide_no, base_name):
     """Формирует имя листа вида 'Сл04_ОПиУ_Латвия'."""
     return _safe_sheet(f"Сл{slide_no:02d}_{base_name}")
 
+def _parse_bdr_plan(bdr_path, unit_name, months):
+    """
+    Читает БДиР (формат «статьи × месяцы») и возвращает
+    {month: value} — план по чистой прибыли.
+
+    В БДиР строка «Чистая прибыль» → «· <Юнит>» — это план ЧП
+    за каждый месяц. Для 2026 года в БДиР колонки B..M — это
+    Август..Декабрь + …
+    """
+    result = {m: 0.0 for m in months}
+    if not bdr_path or not os.path.exists(bdr_path):
+        return result
+
+    wb = openpyxl.load_workbook(bdr_path, data_only=True)
+    ws = wb.active
+
+    # Ищем шапку (строка с названиями месяцев).
+    header_row = None
+    for r in range(1, 6):
+        hits = 0
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            sv = str(v).lower()
+            if any(m in sv for m in _MONTHS_RU_LOWER.values()):
+                hits += 1
+        if hits >= 3:
+            header_row = r
+            break
+
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    # Ищем строку «Чистая прибыль» (level 0), затем «· <Юнит>».
+    cur_section = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+
+        if lvl == 0:
+            cur_section = title
+            continue
+        if lvl == 1 and cur_section == "Чистая прибыль" and title == unit_name:
+            for m, col in month_col.items():
+                result[m] = _num(ws, r, col)
+            return result
+
+    return result
+
+def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
+                     data_plan, data_fact, months):
+    """
+    Лист «Выполнение годового плана» — столбики:
+      • жёлтый  — План (БДиР)
+      • зелёный — Факт (ОПиУ)
+    """
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "План", "Факт"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_plan.get(m, 0.0), 2),
+            round(data_fact.get(m, 0.0), 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    chart.series[0].graphicalProperties.solidFill = _COLOR_LINE_YEL  # план — жёлтый
+    chart.series[1].graphicalProperties.solidFill = _COLOR_NET       # факт — зелёный
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
 
 def build_presentation_data(opiu_path, bdr_path, forecast_path,
                             year, month, output_path):
@@ -685,6 +798,28 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 data=u,
                 months=months,
             )
+
+        # ----------------------------------------------------
+        # План/Факт по чистой прибыли (слайд «Выполнение годового плана»)
+        # Диаграмма строится, только если есть файл БДиР.
+        # ----------------------------------------------------
+        if bdr_path and os.path.exists(bdr_path):
+            plan_vals = _parse_bdr_plan(bdr_path, unit_name, months)
+            # Проверяем, что план не пустой (иначе смысла в листе нет)
+            if any(abs(v) > 0.01 for v in plan_vals.values()):
+                # Номер слайда «План/Факт» берём следующий за Долей ФОТ
+                # (у Латвии это слайд 8, у Антонияса — 12 и т.д.)
+                sl_plan_fact = sl_fot + 1 if sl_fot else 0
+                _sheet_plan_fact(
+                    wb,
+                    sheet_title=_sheet_name_with_slide(
+                        sl_plan_fact, f"ПланФакт_{unit_name}"),
+                    chart_title=f"Выполнение годового плана по ЧП {unit_name}",
+                    subtitle=f"План (БДиР) vs Факт (ОПиУ) — {unit_name}",
+                    data_plan=plan_vals,
+                    data_fact=u["net"],
+                    months=months,
+                )
 
     # --------------------------------------------------------
     # 2. Объекты Латвии

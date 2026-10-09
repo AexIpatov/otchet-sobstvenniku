@@ -487,6 +487,18 @@ with st.expander("📘 БДиР (бюджет доходов и расходов
         key="upload_bdr",
     )
 
+    st.caption(
+        "**Дополнительно для презентации:** загрузите **единый сводный** БДиР "
+        "за весь год — `БДиР 01.ГГГГ-12.ГГГГ.xlsx`. Он используется для диаграмм "
+        "«План/Факт» в презентации."
+    )
+    bdr_full_year_files = st.file_uploader(
+        "Выберите БДиР за все месяцы (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="upload_bdr_full_year",
+    )
+
 with st.expander("📙 Прогнозы месячные", expanded=True):
     st.caption(
         "Загрузите файлы «Прогнозы месячные» для тех же направлений, что и БДиР."
@@ -537,16 +549,19 @@ def _save_uploaded(files, target_dir):
 n_opiu = _save_uploaded(opiu_files, config.TEMP_OPIU_DIR)
 n_opiu_full = _save_uploaded(opiu_full_year_files, config.TEMP_OPIU_DIR)
 n_bdr = _save_uploaded(bdr_files, config.TEMP_FORECAST_DIR)
+n_bdr_full = _save_uploaded(bdr_full_year_files, config.TEMP_FORECAST_DIR)
 n_forecast = _save_uploaded(forecast_files, config.TEMP_FORECAST_DIR)
 n_vat = _save_uploaded(vat_files, config.TEMP_VAT_DIR)
 
-total_uploaded = n_opiu + n_opiu_full + n_bdr + n_forecast + n_vat
+total_uploaded = n_opiu + n_opiu_full + n_bdr + n_bdr_full + n_forecast + n_vat
 
 if total_uploaded > 0:
     st.success(
         f"✅ Сохранено во временную папку: ОПиУ (по месяцам) — {n_opiu}, "
         f"ОПиУ (за все месяцы) — {n_opiu_full}, "
-        f"БДиР — {n_bdr}, Прогнозов — {n_forecast}, НДС — {n_vat}."
+        f"БДиР (по направлениям) — {n_bdr}, "
+        f"БДиР (единый) — {n_bdr_full}, "
+        f"Прогнозов — {n_forecast}, НДС — {n_vat}."
     )
 
 
@@ -694,8 +709,8 @@ if st.button("📊 Собрать диаграммы для презентаци
             try:
                 build_presentation_data(
                     opiu_path=config.PRESENTATION_OPIU_FILE,
-                    bdr_path=None,
-                    forecast_path=None,
+                    bdr_path=config.PRESENTATION_BDR_FILE,
+                    forecast_path=config.PRESENTATION_FORECAST_FILE,
                     year=config.REPORT_YEAR,
                     month=config.REPORT_MONTH,
                     output_path=config.PRESENTATION_OUTPUT_FILE,

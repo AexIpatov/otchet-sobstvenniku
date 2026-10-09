@@ -233,9 +233,11 @@ FORECAST_FILES = {}
 OUTPUT_FILES   = {}
 
 # Дополнительные пути для генератора презентации:
-# ОПиУ-за-все-месяцы и выходной Excel с диаграммами.
-PRESENTATION_OPIU_FILE   = None   # заполняется в set_period()
-PRESENTATION_OUTPUT_FILE = None   # заполняется в set_period()
+# ОПиУ-за-все-месяцы, БДиР, Прогнозы и выходной Excel с диаграммами.
+PRESENTATION_OPIU_FILE       = None   # заполняется в set_period()
+PRESENTATION_OUTPUT_FILE     = None   # заполняется в set_period()
+PRESENTATION_BDR_FILE        = None   # заполняется в set_period()
+PRESENTATION_FORECAST_FILE   = None   # заполняется в set_period()
 
 
 # ============================================================
@@ -291,6 +293,7 @@ def set_period(year, month):
     global OPIU_FILES, BDR_FILES, FORECAST_FILES, OUTPUT_FILES
     global BDR_MONTH_COL
     global PRESENTATION_OPIU_FILE, PRESENTATION_OUTPUT_FILE
+    global PRESENTATION_BDR_FILE, PRESENTATION_FORECAST_FILE
 
     if not (1 <= month <= 12):
         raise ValueError(f"Месяц должен быть 1..12, получено: {month}")
@@ -342,6 +345,17 @@ def set_period(year, month):
     # Пути для генератора презентации
     PRESENTATION_OPIU_FILE = _presentation_opiu_path(year, month)
     PRESENTATION_OUTPUT_FILE = OUTPUT_DIR / f"Диаграммы для презентации {year}_{month:02d}.xlsx"
+
+    # БДиР для презентации План/Факт — ЕДИНЫЙ сводный файл за год
+    # (формат «БДиР 01.2026-12.2026.xlsx»). Пользователь загружает
+    # его в отдельном загрузчике (см. app.py).
+    if year <= 2026:
+        PRESENTATION_BDR_FILE = TEMP_FORECAST_DIR / f"БДиР 01.{year}-12.{year}.xlsx"
+    else:
+        PRESENTATION_BDR_FILE = TEMP_FORECAST_DIR / f"БДиР 01.{year}-12.{year}.xlsx"
+
+    # Прогнозы месячные в презентации не участвуют
+    PRESENTATION_FORECAST_FILE = None
 
 set_period(_DEFAULT_YEAR, _DEFAULT_MONTH)
 
