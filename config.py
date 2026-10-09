@@ -39,12 +39,14 @@ REF_DIR       = INPUT_DIR / "Справочники"
 TEMP_DIR      = Path(tempfile.gettempdir()) / "otchet_sobstvenniku"
 
 # Подпапки внутри временной папки
-TEMP_OPIU_DIR     = TEMP_DIR / "ОПиУ"
-TEMP_FORECAST_DIR = TEMP_DIR / "Прогнозы"
-TEMP_VAT_DIR      = TEMP_DIR / "НДС"
+TEMP_OPIU_DIR         = TEMP_DIR / "ОПиУ"
+TEMP_FORECAST_DIR     = TEMP_DIR / "Прогнозы"
+TEMP_VAT_DIR          = TEMP_DIR / "НДС"
+TEMP_PRESENTATION_DIR = TEMP_DIR / "Презентация"
 
 # Создаём папки (если их нет)
-for _d in (OUTPUT_DIR, TEMP_DIR, TEMP_OPIU_DIR, TEMP_FORECAST_DIR, TEMP_VAT_DIR):
+for _d in (OUTPUT_DIR, TEMP_DIR, TEMP_OPIU_DIR, TEMP_FORECAST_DIR,
+           TEMP_VAT_DIR, TEMP_PRESENTATION_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -230,6 +232,11 @@ BDR_FILES      = {}
 FORECAST_FILES = {}
 OUTPUT_FILES   = {}
 
+# Дополнительные пути для генератора презентации:
+# ОПиУ-за-все-месяцы и выходной Excel с диаграммами.
+PRESENTATION_OPIU_FILE   = None   # заполняется в set_period()
+PRESENTATION_OUTPUT_FILE = None   # заполняется в set_period()
+
 
 # ============================================================
 # 9. ФУНКЦИЯ ПЕРЕСБОРКИ ПУТЕЙ
@@ -247,6 +254,15 @@ def _opiu_path(direction, year, month):
     fname_dir = DIRECTION_TO_FILENAME.get(direction, direction)
     name = f"ОПиУ {month:02d}.{year}-{month:02d}.{year} {fname_dir}.xlsx"
     # >>> Читаем из ВРЕМЕННОЙ папки (туда app.py сохранит файлы пользователя)
+    return TEMP_OPIU_DIR / name
+
+
+def _presentation_opiu_path(year, month):
+    """
+    Путь к ОПиУ за много месяцев (используется в презентации).
+    Формат: «ОПиУ 01.2026-09.2026.xlsx» — от января до отчётного месяца.
+    """
+    name = f"ОПиУ 01.{year}-{month:02d}.{year}.xlsx"
     return TEMP_OPIU_DIR / name
 
 
@@ -274,6 +290,7 @@ def set_period(year, month):
     global REPORT_MONTH_RU, PREV_MONTH_RU, NEXT_MONTH_RU
     global OPIU_FILES, BDR_FILES, FORECAST_FILES, OUTPUT_FILES
     global BDR_MONTH_COL
+    global PRESENTATION_OPIU_FILE, PRESENTATION_OUTPUT_FILE
 
     if not (1 <= month <= 12):
         raise ValueError(f"Месяц должен быть 1..12, получено: {month}")
@@ -317,6 +334,14 @@ def set_period(year, month):
         fname = f"Отчет_для_собственника_{key}_{year}_{month:02d}.xlsx"
         OUTPUT_FILES[key] = OUTPUT_DIR / fname
 
+    OUTPUT_FILES.clear()
+    for key in REPORT_KEYS:
+        fname = f"Отчет_для_собственника_{key}_{year}_{month:02d}.xlsx"
+        OUTPUT_FILES[key] = OUTPUT_DIR / fname
+
+    # Пути для генератора презентации
+    PRESENTATION_OPIU_FILE = _presentation_opiu_path(year, month)
+    PRESENTATION_OUTPUT_FILE = OUTPUT_DIR / f"Диаграммы для презентации {year}_{month:02d}.xlsx"
 
 set_period(_DEFAULT_YEAR, _DEFAULT_MONTH)
 

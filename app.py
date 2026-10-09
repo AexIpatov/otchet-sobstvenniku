@@ -22,6 +22,7 @@ import streamlit as st
 
 import config
 from src.report_builder import build_all_reports, build_report
+from src.presentation_builder import build_presentation_data
 
 
 # ============================================================
@@ -463,6 +464,17 @@ with st.expander("📗 ОПиУ (отчёт о прибылях и убытка�
         key="upload_opiu",
     )
 
+    st.caption(
+        "**Дополнительно:** загрузите ОПиУ за **все месяцы года** "
+        "(например, `ОПиУ 01.2026-09.2026.xlsx`) — это нужно для генератора диаграмм презентации."
+    )
+    opiu_full_year_files = st.file_uploader(
+        "Выберите ОПиУ за все месяцы (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="upload_opiu_full_year",
+    )
+
 with st.expander("📘 БДиР (бюджет доходов и расходов)", expanded=True):
     st.caption(
         "Загрузите годовые файлы БДиР для направлений: Латвия, Европа (Estate EU), "
@@ -523,15 +535,17 @@ def _save_uploaded(files, target_dir):
 
 
 n_opiu = _save_uploaded(opiu_files, config.TEMP_OPIU_DIR)
+n_opiu_full = _save_uploaded(opiu_full_year_files, config.TEMP_OPIU_DIR)
 n_bdr = _save_uploaded(bdr_files, config.TEMP_FORECAST_DIR)
 n_forecast = _save_uploaded(forecast_files, config.TEMP_FORECAST_DIR)
 n_vat = _save_uploaded(vat_files, config.TEMP_VAT_DIR)
 
-total_uploaded = n_opiu + n_bdr + n_forecast + n_vat
+total_uploaded = n_opiu + n_opiu_full + n_bdr + n_forecast + n_vat
 
 if total_uploaded > 0:
     st.success(
-        f"✅ Сохранено во временную папку: ОПиУ — {n_opiu}, "
+        f"✅ Сохранено во временную папку: ОПиУ (по месяцам) — {n_opiu}, "
+        f"ОПиУ (за все месяцы) — {n_opiu_full}, "
         f"БДиР — {n_bdr}, Прогнозов — {n_forecast}, НДС — {n_vat}."
     )
 
@@ -646,6 +660,70 @@ for col, report_key in zip(
             st.caption(f"`{path.name}`")
         else:
             st.info(f"Файл ещё не собран: `{path.name}`")
+
+
+# ============================================================
+# БЛОК 5. ПРЕЗЕНТАЦИЯ (ДИАГРАММЫ В EXCEL)
+# ============================================================
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-title">📊 Шаг 5 · Диаграммы для презентации</div>',
+    unsafe_allow_html=True,
+)
+st.markdown(
+    '<div class="section-hint">'
+    'Excel-файл с диаграммами для вставки в презентацию. '
+    'Использует ОПиУ за все месяцы года (загрузите его в Шаге 1).'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+if st.button("📊 Собрать диаграммы для презентации",
+             type="primary", use_container_width=True,
+             key="build_presentation"):
+    if not config.PRESENTATION_OPIU_FILE or \
+       not config.PRESENTATION_OPIU_FILE.exists():
+        st.error(
+            f"❌ Не найден файл ОПиУ за все месяцы: "
+            f"`{config.PRESENTATION_OPIU_FILE.name if config.PRESENTATION_OPIU_FILE else '—'}`. "
+            f"Загрузите его в Шаге 1 (блок ОПиУ → «ОПиУ за все месяцы»)."
+        )
+    else:
+        with st.spinner("Собираю диаграммы..."):
+            try:
+                build_presentation_data(
+                    opiu_path=config.PRESENTATION_OPIU_FILE,
+                    bdr_path=None,
+                    forecast_path=None,
+                    year=config.REPORT_YEAR,
+                    month=config.REPORT_MONTH,
+                    output_path=config.PRESENTATION_OUTPUT_FILE,
+                )
+                st.success("Готово! Файл с диаграммами собран.")
+            except Exception as e:
+                st.error(f"Ошибка при сборке диаграмм: {e}")
+                with st.expander("🔧 Подробности ошибки (для разработчика)"):
+                    st.code(traceback.format_exc())
+
+# Кнопка скачивания
+pres_path = config.PRESENTATION_OUTPUT_FILE
+if pres_path and pres_path.exists():
+    with open(pres_path, "rb") as f:
+        pres_data = f.read()
+    st.download_button(
+        label="⬇️ Скачать «Диаграммы для презентации»",
+        data=pres_data,
+        file_name=pres_path.name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_presentation",
+        use_container_width=True,
+    )
+    st.caption(f"`{pres_path.name}`")
+else:
+    st.info(
+        f"Файл ещё не собран: `{pres_path.name if pres_path else '—'}`"
+    )
 
 
 # ============================================================
