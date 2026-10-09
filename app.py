@@ -499,6 +499,18 @@ with st.expander("📘 БДиР (бюджет доходов и расходов
         key="upload_bdr_full_year",
     )
 
+    st.caption(
+        "**Дополнительно для презентации:** загрузите **ОДДС** за весь год — "
+        "`ОДДС 01.01.ГГГГ-ММ.ГГГГ.xlsx`. Он используется для таблиц "
+        "«Операционное сальдо»."
+    )
+    odds_files = st.file_uploader(
+        "Выберите ОДДС (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="upload_odds",
+    )
+
 with st.expander("📙 Прогнозы месячные", expanded=True):
     st.caption(
         "Загрузите файлы «Прогнозы месячные» для тех же направлений, что и БДиР."
@@ -550,10 +562,11 @@ n_opiu = _save_uploaded(opiu_files, config.TEMP_OPIU_DIR)
 n_opiu_full = _save_uploaded(opiu_full_year_files, config.TEMP_OPIU_DIR)
 n_bdr = _save_uploaded(bdr_files, config.TEMP_FORECAST_DIR)
 n_bdr_full = _save_uploaded(bdr_full_year_files, config.TEMP_FORECAST_DIR)
+n_odds = _save_uploaded(odds_files, config.TEMP_FORECAST_DIR)
 n_forecast = _save_uploaded(forecast_files, config.TEMP_FORECAST_DIR)
 n_vat = _save_uploaded(vat_files, config.TEMP_VAT_DIR)
 
-total_uploaded = n_opiu + n_opiu_full + n_bdr + n_bdr_full + n_forecast + n_vat
+total_uploaded = n_opiu + n_opiu_full + n_bdr + n_bdr_full + n_odds + n_forecast + n_vat
 
 if total_uploaded > 0:
     st.success(
@@ -561,6 +574,7 @@ if total_uploaded > 0:
         f"ОПиУ (за все месяцы) — {n_opiu_full}, "
         f"БДиР (по направлениям) — {n_bdr}, "
         f"БДиР (единый) — {n_bdr_full}, "
+        f"ОДДС — {n_odds}, "
         f"Прогнозов — {n_forecast}, НДС — {n_vat}."
     )
 

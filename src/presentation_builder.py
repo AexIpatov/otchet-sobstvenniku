@@ -1181,7 +1181,12 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     #     Слайд 37 — East-Восток
     # --------------------------------------------------------
     # Путь к ОДДС — единый файл в TEMP_FORECAST_DIR
-    odds_path = config.TEMP_FORECAST_DIR / f"ОДДС 01.01.{year}-{month:02d}.{year}.xlsx"
+    # Путь к ОДДС — единый файл в TEMP_FORECAST_DIR.
+    # Формат имени: «ОДДС 01.01.2026-30.09.2026.xlsx» (с последним днём месяца).
+    # Определяем последний день отчётного месяца через calendar.monthrange.
+    import calendar as _cal
+    _last_day = _cal.monthrange(year, month)[1]
+    odds_path = config.TEMP_FORECAST_DIR / f"ОДДС 01.01.{year}-{_last_day:02d}.{month:02d}.{year}.xlsx"
 
     if odds_path.exists():
         # --- Латвия (слайд 2) ---
