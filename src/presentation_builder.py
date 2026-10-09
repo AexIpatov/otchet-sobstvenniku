@@ -768,6 +768,163 @@ def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
 
     ws.add_chart(chart, "E4")
 
+# ------------------------------------------------------------
+# Лист: Таблица «Операционное сальдо» (слайды 2 и 37)
+# ------------------------------------------------------------
+def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
+                               rows_data, months):
+    """
+    Табличный лист «Операционное сальдо».
+
+    rows_data — список словарей:
+      {"name": str, "values": {month: value}, "is_total": bool}
+    """
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    # --- Шапка таблицы ---
+    header_row = 4
+    headers = ["Направление"] + [_MONTHS_RU_CAP[m] for m in months]
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+
+    # --- Строки данных ---
+    for i, row in enumerate(rows_data):
+        r = header_row + 1 + i
+        name_cell = ws.cell(row=r, column=1, value=row["name"])
+        name_cell.border = _CELL_BORDER
+        name_cell.alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=False)
+
+        if row.get("is_total"):
+            name_cell.font = Font(bold=True, size=11, color="1E3A8A")
+
+        for j, m in enumerate(months):
+            v = row["values"].get(m, 0.0)
+            cell = ws.cell(row=r, column=2 + j, value=round(v, 2))
+            cell.border = _CELL_BORDER
+            cell.number_format = '#,##0'
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+
+            # Цвет числа:
+            #   положительное (>0) — зелёный
+            #   отрицательное (<0) — синий
+            #   ноль или пусто — обычный
+            if v > 0.005:
+                cell.font = Font(color="00B050", bold=True)   # зелёный
+            elif v < -0.005:
+                cell.font = Font(color="0070C0", bold=True)   # синий
+
+            if row.get("is_total"):
+                cell.font = Font(
+                    color=("00B050" if v > 0.005 else
+                           "0070C0" if v < -0.005 else "000000"),
+                    bold=True,
+                )
+
+    # --- Немного отрегулируем ширину колонок ---
+    ws.column_dimensions["A"].width = 45
+    for c in range(2, 2 + len(months)):
+        col_letter = ws.cell(row=header_row, column=c).column_letter
+        ws.column_dimensions[col_letter].width = 12
+
+def _parse_odds_balance(odds_path, unit_name, months):
+    """
+    Читает ОДДС-файл и возвращает:
+      {
+        "rows": [
+           {"name": "· AN14 …", "values": {1: 6027, ...}},
+           ...
+           {"name": "ИТОГО", "values": {...}, "is_total": True},
+        ]
+      }
+
+    unit_name — "Latvia" или "East-Восток".
+    Возвращает только строки, относящиеся к этому юниту,
+    плюс агрегатную строку «ИТОГО» для этого юнита.
+    """
+    result = {"rows": []}
+    if not odds_path or not os.path.exists(odds_path):
+        return result
+
+    wb = openpyxl.load_workbook(odds_path, data_only=True)
+    ws = wb.active
+
+    # 1) Шапка: строка с «Направление / Январь 2026 / … / Сальдо»
+    header_row = None
+    for r in range(1, 8):
+        v = ws.cell(row=r, column=1).value
+        if v and "направление" in str(v).lower():
+            header_row = r
+            break
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    # 2) Ищем строку с названием юнита (level 0, без «·»)
+    unit_row = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+        if lvl == 0 and title == unit_name:
+            unit_row = r
+            break
+
+    if unit_row is None:
+        return result
+
+    # 3) Собираем подстроки объекта (level 1, «· …»),
+    #    пока не началась другая секция уровня 0.
+    #    Отдельная задача — собрать саму строку «Сальдо по направлению»/«ИТОГО».
+    cur_object = None
+    objects = []  # список (name, values)
+
+    for r in range(unit_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            # Пустая строка может содержать числа для предыдущего объекта —
+            # пропускаем: в ОДДС она содержит «-25233.39» без названия.
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+
+        # Дошли до следующего юнита (level 0) — стоп
+        if lvl == 0 and title != unit_name:
+            break
+
+        # Объект (level 1)
+        if lvl == 1:
+            # Если нашли «· Сальдо» — это агрегат, сохраняем отдельно
+            if title.lower() in ("сальдо", "итого",
+                                 "сальдо по направлению"):
+                values = {m: _num(ws, r, col) for m, col in month_col.items()}
+                result["rows"].append({
+                    "name": "ИТОГО",
+                    "values": values,
+                    "is_total": True,
+                })
+                continue
+
+            # Иначе — новый объект
+            values = {m: _num(ws, r, col) for m, col in month_col.items()}
+            objects.append({"name": title, "values": values})
+
+    # 4) Объекты — перед «ИТОГО»
+    for o in objects:
+        result["rows"].append(o)
+
+    return result
+
 def build_presentation_data(opiu_path, bdr_path, forecast_path,
                             year, month, output_path):
     months = list(range(1, month + 1))
@@ -1015,6 +1172,39 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 subtitle="План (БДиР) vs Факт (ОПиУ) — Коммерческие",
                 data_plan=plan_comm,
                 data_fact=commercial["net"],
+                months=months,
+            )
+
+    # --------------------------------------------------------
+    # 3b. Табличные слайды — «Операционное сальдо»
+    #     Слайд 2  — Латвия
+    #     Слайд 37 — East-Восток
+    # --------------------------------------------------------
+    # Путь к ОДДС — единый файл в TEMP_FORECAST_DIR
+    odds_path = config.TEMP_FORECAST_DIR / f"ОДДС 01.01.{year}-{month:02d}.{year}.xlsx"
+
+    if odds_path.exists():
+        # --- Латвия (слайд 2) ---
+        lat_bal = _parse_odds_balance(odds_path, "Latvia", months)
+        if lat_bal["rows"]:
+            _sheet_operational_balance(
+                wb,
+                sheet_title=_sheet_name_with_slide(2, "Сальдо_Latvia"),
+                chart_title="Операционное сальдо Латвия (без НДС)",
+                subtitle=f"Факт за {_MONTHS_RU_LOWER.get(month, '')} {year}",
+                rows_data=lat_bal["rows"],
+                months=months,
+            )
+
+        # --- East-Восток (слайд 37) ---
+        east_bal = _parse_odds_balance(odds_path, "East-Восток", months)
+        if east_bal["rows"]:
+            _sheet_operational_balance(
+                wb,
+                sheet_title=_sheet_name_with_slide(37, "Сальдо_East-Восток"),
+                chart_title="Операционное сальдо East-Восток",
+                subtitle=f"Факт за {_MONTHS_RU_LOWER.get(month, '')} {year}",
+                rows_data=east_bal["rows"],
                 months=months,
             )
 
