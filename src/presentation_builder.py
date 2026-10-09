@@ -3,20 +3,15 @@
 # Генератор Excel с диаграммами для презентации.
 #
 # Читает ОПиУ формата «статьи × месяцы» с древовидной структурой
-# (·, ··, ···, ····) и строит книгу Excel:
-#   - на каждом листе — один слайд презентации:
-#       * таблица данных
-#       * живой график (openpyxl.chart)
+# (·, ··, ···, ····) и строит книгу Excel.
 #
-# Типы листов:
-#   ОПиУ_<Юнит>       — столбики: Выручка (жёлтый) + ЧП (зелёный)
-#   EBITDA_<Юнит>     — линия: EBITDA margin, %
-#   Доля_ФОТ_<Юнит>   — линия: доля ФОТ в выручке, %
-#   ОПиУ_<Объект>     — столбики по объектам Латвии
-#   EBITDA_<Объект>   — линия по объектам Латвии
-#   Доля_ФОТ_<Объект> — линия по объектам Латвии
-#
-# Поддерживает любой год и месяц (не только 2026-09).
+# ГЛАВНАЯ ИДЕЯ ПАРСИНГА:
+#   1) Один раз пробегаем файл и строим плоский список строк:
+#         [(row_idx, level, title_clean, {месяц: значение})]
+#   2) Для каждой искомой величины (выручка юнита, ЧП юнита,
+#      ФОТ объекта и т.п.) проходим по этому списку с ЯВНЫМ
+#      условием «находимся внутри секции X, юнит Y, объект Z».
+#      Это исключает любые сдвиги контекста.
 # ============================================================
 
 import os
@@ -44,7 +39,7 @@ _MONTHS_RU_CAP = {
     7: "Июл", 8: "Авг", 9: "Сен", 10: "Окт", 11: "Ноя", 12: "Дек",
 }
 
-# Юниты (уровень 1, «· <Юнит>»)
+# Юниты: ТОЧНЫЕ названия строк уровня 1 из файла
 _UNITS = [
     "Latvia",
     "East-Восток",
@@ -54,7 +49,7 @@ _UNITS = [
     "UK Estate",
 ]
 
-# Объекты Латвии (уровень 2, «·· <Объект>»), для отдельных листов
+# Объекты Латвии для отдельных листов: (имя в файле, имя для листа)
 _LATVIA_OBJECTS = [
     ("AN14 Антониас 14 (дом + парковка)", "Антонияс"),
     ("AC89 Чака 89 (дом + парковка)",     "Чака"),
@@ -62,7 +57,7 @@ _LATVIA_OBJECTS = [
     ("EKS_Esporta iela 12-113",            "Эспорта"),
 ]
 
-# Объекты, которые собираем в один «виртуальный» блок «Коммерческие»
+# Коммерческие объекты Латвии (собираем в один виртуальный блок)
 _LATVIA_COMMERCIAL = [
     "D4 Парковка-Deglava4",
     "AC87 Гараж Чака",
@@ -93,7 +88,6 @@ _CELL_BORDER   = Border(
     bottom=Side(style="thin", color="CBD5E1"),
 )
 
-# Цвета оформления
 _COLOR_REVENUE = "FFC000"   # жёлтый
 _COLOR_NET     = "70AD47"   # зелёный
 _COLOR_LINE_1  = "C00000"   # красный
@@ -104,12 +98,12 @@ _COLOR_LINE_2  = "4472C4"   # синий
 # ВСПОМОГАТЕЛЬНОЕ
 # ============================================================
 
-def _clean_title(s):
+def _clean(s):
     if s is None:
         return ""
     s = str(s).replace("\u00a0", " ")
-    s = re.sub(r"^[\s·]+", "", s)
     s = re.sub(r"[\s·]+$", "", s)
+    s = re.sub(r"^[\s·]+", "", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
@@ -121,7 +115,7 @@ def _level(s):
     return m.group(0).count("·") if m else 0
 
 
-def _cell_float(ws, r, c):
+def _num(ws, r, c):
     v = ws.cell(row=r, column=c).value
     if v is None:
         return 0.0
@@ -136,245 +130,223 @@ def _cell_float(ws, r, c):
         return 0.0
 
 
-def _safe_sheet_name(name):
+def _safe_sheet(name):
     name = re.sub(r"[\\/*?:\[\]]", "_", name)
     return name[:31]
 
 
-def _month_to_col(ws, header_row, target_month, max_col=20):
-    """Возвращает индекс колонки (1-based) для нужного месяца.
-    Ищет по названию («Январь 2026», «сентябрь 2026», «Sep 2026» и т.п.).
-    """
-    target_ru = _MONTHS_RU_LOWER.get(target_month, "").lower()
-    target_en = ["jan", "feb", "mar", "apr", "may", "jun",
-                 "jul", "aug", "sep", "oct", "nov", "dec"][target_month - 1]
-
-    for c in range(2, min(ws.max_column, max_col) + 1):
+def _find_month_columns(ws, header_row, months):
+    """Возвращает {month: col_idx} по названиям месяцев в шапке."""
+    result = {}
+    for c in range(2, min(ws.max_column, 25) + 1):
         v = ws.cell(row=header_row, column=c).value
         if v is None:
             continue
-        if isinstance(v, _dt.datetime) or isinstance(v, _dt.date):
-            if v.month == target_month:
-                return c
+        if isinstance(v, (_dt.datetime, _dt.date)):
+            if v.month in months and v.month not in result:
+                result[v.month] = c
             continue
         sv = str(v).lower()
-        if target_ru and target_ru in sv:
-            return c
-        if target_en in sv:
-            return c
-    return None
+        for m in months:
+            if m in result:
+                continue
+            if _MONTHS_RU_LOWER[m] in sv:
+                result[m] = c
+                break
+    return result
 
 
 # ============================================================
-# ГЛАВНЫЙ ПАРСЕР ОПиУ
+# ШАГ 1. ПЛОСКИЙ СПИСОК СТРОК ОПиУ
 # ============================================================
 
-def _parse_opiu(opiu_path, months):
+def _read_flat_rows(opiu_path, months):
     """
-    Читает ОПиУ формата «статьи × месяцы» с древовидной структурой.
-
     Возвращает:
-    {
-        "units": {
-            "Latvia": {
-                "revenue": {m: value},
-                "net":     {m: value},
-                "fot":     {m: value},   # ФОТ = сумма по всем объектам
-                "objects": {
-                    "AN14 ...": {
-                        "revenue": {m: value},
-                        "net":     {m: value},
-                        "fot":     {m: value},
-                    },
-                    ...
-                }
-            },
-            ...
-        }
-    }
+        rows = [(row_idx, level, title_clean, {month: value})]
+        month_col = {month: col_idx}
+
+    Никакой интерпретации — просто дамп всех строк с уровнями.
     """
     if not opiu_path or not os.path.exists(opiu_path):
-        return {"units": {}}
+        return [], {}
 
     wb = openpyxl.load_workbook(opiu_path, data_only=True)
     ws = wb.active
 
-    # --- 1. Шапка: ищем строку с месяцами ---
+    # Ищем шапку: строка, где минимум 3 колонки содержат названия месяцев
     header_row = None
     for r in range(1, 6):
-        found = 0
-        for c in range(2, min(ws.max_column, 20) + 1):
+        hits = 0
+        for c in range(2, min(ws.max_column, 25) + 1):
             v = ws.cell(row=r, column=c).value
             if v is None:
                 continue
             if isinstance(v, (_dt.datetime, _dt.date)):
-                found += 1
+                hits += 1
                 continue
             sv = str(v).lower()
             if any(m in sv for m in _MONTHS_RU_LOWER.values()):
-                found += 1
-        if found >= 3:
+                hits += 1
+        if hits >= 3:
             header_row = r
             break
 
     if header_row is None:
-        print(f"[WARN] [presentation_builder] не найдена шапка в {opiu_path}")
-        return {"units": {}}
+        print("[presentation_builder] шапка с месяцами не найдена")
+        return [], {}
 
-    # --- 2. Карта колонок месяцев ---
-    month_col = {}
-    for m in months:
-        col = _month_to_col(ws, header_row, m)
-        if col:
-            month_col[m] = col
+    month_col = _find_month_columns(ws, header_row, months)
 
-    if not month_col:
-        print("[WARN] не найдены колонки месяцев")
-        return {"units": {}}
-
-    # --- 3. Один проход: собираем данные с учётом уровней ---
-    units = {u: {
-        "revenue": {m: 0.0 for m in months},
-        "net":     {m: 0.0 for m in months},
-        "fot":     {m: 0.0 for m in months},
-        "objects": {},
-    } for u in _UNITS}
-
-    # Текущий контекст
-    cur_section = None       # "Выручка" / "Производственные расходы" / ... / "Чистая прибыль"
-    cur_unit = None          # имя юнита (совпадает с _UNITS)
-    cur_object = None        # имя объекта (уровень 2, «·· »)
-    cur_object_is_fot = False  # мы сейчас внутри строки «ФОТ производственного/коммерческого»
-
+    rows = []
     for r in range(header_row + 1, ws.max_row + 1):
         raw = ws.cell(row=r, column=1).value
         if raw is None:
             continue
-
+        title = _clean(raw)
+        if title == "":
+            continue
         lvl = _level(raw)
-        title = _clean_title(raw)
+        values = {m: _num(ws, r, col) for m, col in month_col.items()}
+        rows.append((r, lvl, title, values))
 
-        # --- Уровень 0: секция ---
-        if lvl == 0:
-            cur_section = title
-            cur_unit = None
-            cur_object = None
-            cur_object_is_fot = False
-            continue
+    return rows, month_col
 
-        # --- Уровень 1: юнит ---
-        if lvl == 1:
-            cur_unit = title if title in _UNITS else None
-            cur_object = None
-            cur_object_is_fot = False
-            continue
 
-        # --- Уровень 2: объект ---
-        if lvl == 2:
-            cur_object = title
-            # заводим слот объекта (только для юнитов, которые нас интересуют)
-            if cur_unit:
-                if cur_object not in units[cur_unit]["objects"]:
-                    units[cur_unit]["objects"][cur_object] = {
-                        "revenue": {m: 0.0 for m in months},
-                        "net":     {m: 0.0 for m in months},
-                        "fot":     {m: 0.0 for m in months},
-                    }
-            continue
+# ============================================================
+# ШАГ 2. ИЗВЛЕЧЕНИЕ ДАННЫХ ИЗ ПЛОСКОГО СПИСКА
+# ============================================================
 
-        # --- Уровень 3: статья. Может быть ФОТ? ---
-        # Уровень 3 — это подстатья. Нам она как «··· ФОТ производственного персонала» не встречается,
-        # но на всякий случай проверяем.
-        if lvl == 3:
-            title_low = title.lower()
-            if "фот производственного" in title_low or \
-               "фот коммерческого" in title_low:
-                # Это ФОТ объекта. Читаем значения.
-                if cur_unit and cur_object:
-                    for m, col in month_col.items():
-                        units[cur_unit]["objects"][cur_object]["fot"][m] += _cell_float(ws, r, col)
-            continue
+# Секции (level 0), в которых мы ищем:
+#   - Выручка              → revenue
+#   - Чистая прибыль       → net
+#   - Производственные расходы → ФОТ (производственный)
+#   - Коммерческие расходы     → ФОТ (коммерческий)
+_SECTION_REVENUE = "Выручка"
+_SECTION_NET     = "Чистая прибыль"
+_SECTION_PROD    = "Производственные расходы"
+_SECTION_COMM    = "Коммерческие расходы"
 
-        # --- Уровень 4: ФОТ (главный случай) ---
-        if lvl >= 4:
-            title_low = title.lower()
-            is_fot = ("фот производственного" in title_low or
-                      "фот коммерческого" in title_low)
-            if is_fot and cur_unit and cur_object:
-                for m, col in month_col.items():
-                    units[cur_unit]["objects"][cur_object]["fot"][m] += _cell_float(ws, r, col)
-            continue
 
-    # --- 4. Второй проход: собираем revenue и net по юнитам и объектам ---
+def _find_row(rows, section, unit, object_name=None, level_expected=None):
+    """
+    Возвращает словарь {month: value} для строки, которая находится:
+      - в секции `section` (level 0),
+      - затем идёт `unit` (level 1, точное совпадение),
+      - затем, если задан, `object_name` (level 2, точное совпадение),
+      - и сама строка имеет уровень `level_expected`.
+
+    Логика:
+      - проходим список rows по порядку;
+      - отслеживаем текущую секцию (level 0),
+        текущего юнита (level 1),
+        текущий объект (level 2);
+      - когда все три совпали и уровень строки = level_expected —
+        возвращаем значения.
+
+    Если object_name=None, ищем строку, у которой level == 1
+    (юнит) в нужной секции.
+    """
     cur_section = None
     cur_unit = None
     cur_object = None
 
-    for r in range(header_row + 1, ws.max_row + 1):
-        raw = ws.cell(row=r, column=1).value
-        if raw is None:
-            continue
-
-        lvl = _level(raw)
-        title = _clean_title(raw)
-
+    for r, lvl, title, values in rows:
         if lvl == 0:
             cur_section = title
             cur_unit = None
             cur_object = None
             continue
 
+        # Секция сменилась — прерываемся, если уже нашли нужное
+        if cur_section != section:
+            if cur_section is not None and cur_section != section:
+                # Возможно, мы ушли из нужной секции — но могли
+                # вернуться позже. Просто продолжаем.
+                pass
+
         if lvl == 1:
-            cur_unit = title if title in _UNITS else None
+            cur_unit = title
             cur_object = None
-            # Если это раздел «Выручка» или «Чистая прибыль», пишем в юнит
-            if cur_unit and cur_section in ("Выручка", "Чистая прибыль"):
-                key = "revenue" if cur_section == "Выручка" else "net"
-                for m, col in month_col.items():
-                    units[cur_unit][key][m] = _cell_float(ws, r, col)
+            # Проверяем: может, это искомая строка (юнит без объекта)
+            if (object_name is None
+                    and cur_section == section
+                    and cur_unit == unit):
+                return dict(values)
             continue
 
         if lvl == 2:
             cur_object = title
-            if cur_unit and cur_section in ("Выручка", "Чистая прибыль"):
-                key = "revenue" if cur_section == "Выручка" else "net"
-                if cur_object in units[cur_unit]["objects"]:
-                    for m, col in month_col.items():
-                        units[cur_unit]["objects"][cur_object][key][m] = _cell_float(ws, r, col)
+            # Юнит и объект без секции нам не подходят
             continue
 
-        # Уровень 3+ для revenue/net не нужен — там только детализация
+    return {}
 
-    # --- 5. Пересчёт ФОТ на уровне юнита: сумма по всем объектам ---
-    for u_name, u in units.items():
-        for m in months:
-            u["fot"][m] = sum(
-                obj["fot"][m] for obj in u["objects"].values()
-            )
 
-    # --- 6. Виртуальный юнит «Коммерческие» (для Латвии) ---
-    if "Latvia" in units:
-        latvia = units["Latvia"]
-        commercial = {
-            "revenue": {m: 0.0 for m in months},
-            "net":     {m: 0.0 for m in months},
-            "fot":     {m: 0.0 for m in months},
-        }
-        for obj_name in _LATVIA_COMMERCIAL:
-            obj = latvia["objects"].get(obj_name)
-            if not obj:
-                continue
-            for m in months:
-                commercial["revenue"][m] += obj["revenue"][m]
-                commercial["net"][m]     += obj["net"][m]
-                commercial["fot"][m]     += obj["fot"][m]
-        latvia["objects"]["Коммерческие помещения LV"] = commercial
+def _find_object_fot(rows, section, unit, object_name):
+    """
+    Возвращает {month: value} для ФОТ объекта.
+    ФОТ — строка уровня 4 (···) с текстом, содержащим «ФОТ
+    производственного персонала» или «ФОТ коммерческого персонала»,
+    внутри блока ·· <object_name> внутри · <unit> в секции `section`.
+    """
+    cur_section = None
+    cur_unit = None
+    cur_object = None
+    result = {}
 
-    return {"units": units}
+    for r, lvl, title, values in rows:
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            cur_object = None
+            continue
+        if lvl == 1:
+            cur_unit = title
+            cur_object = None
+            continue
+        if lvl == 2:
+            cur_object = title
+            continue
+
+        # Уровень 3+ внутри объекта
+        if (cur_section == section
+                and cur_unit == unit
+                and cur_object == object_name
+                and lvl >= 3):
+            tl = title.lower()
+            if "фот производственного" in tl or \
+               "фот коммерческого" in tl:
+                for m, v in values.items():
+                    result[m] = result.get(m, 0.0) + v
+
+    return result
 
 
 # ============================================================
-# ПОСТРОЕНИЕ ЛИСТОВ
+# ШАГ 3. СБОРКА ДАННЫХ ПО ЮНИТАМ И ОБЪЕКТАМ
+# ============================================================
+
+def _collect_units(rows, months):
+    """
+    Возвращает:
+    {
+        "Latvia": {
+            "revenue": {m: v},
+            "net":     {m: v},
+            "fot":     {m: v},
+            "objects": {
+                "AN14 ...": {"revenue": {...}, "net": {...}, "fot": {...}},
+                ...
+            }
+        },
+        ...
+    }
+    """
+
+
+# ============================================================
+# ПОСТРОЕНИЕ ЛИСТОВ EXCEL
 # ============================================================
 
 def _write_header(ws, title, subtitle=""):
@@ -398,7 +370,6 @@ def _write_table(ws, start_row, headers, rows):
             cell.border = _CELL_BORDER
             if isinstance(v, (int, float)):
                 cell.number_format = '#,##0'
-    return start_row + len(rows)
 
 
 def _style_bar(chart, title, w=20, h=10):
@@ -419,11 +390,8 @@ def _style_line(chart, title, w=20, h=10):
     chart.y_axis.delete = False
 
 
-# ------------------------------------------------------------
-# Лист: ОПиУ юнита/объекта (Выручка + ЧП)
-# ------------------------------------------------------------
 def _sheet_revenue_profit(wb, name, data, months):
-    sheet_name = _safe_sheet_name(f"ОПиУ_{name}")
+    sheet_name = _safe_sheet(f"ОПиУ_{name}")
     ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
 
     _write_header(ws, f"ОПиУ {name}", "Выручка и чистая прибыль по месяцам")
@@ -435,11 +403,8 @@ def _sheet_revenue_profit(wb, name, data, months):
     ]
     _write_table(ws, 4, headers, rows)
 
-    # Диаграмма
-    data_ref = Reference(ws, min_col=2, max_col=1 + len(months),
-                         min_row=4, max_row=6)
-    cats = Reference(ws, min_col=2, max_col=1 + len(months),
-                     min_row=4, max_row=4)
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=6)
+    cats = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=4)
 
     chart = BarChart()
     chart.type = "col"
@@ -451,11 +416,8 @@ def _sheet_revenue_profit(wb, name, data, months):
     ws.add_chart(chart, "A9")
 
 
-# ------------------------------------------------------------
-# Лист: EBITDA margin (линия)
-# ------------------------------------------------------------
 def _sheet_ebitda(wb, name, data, months):
-    sheet_name = _safe_sheet_name(f"EBITDA_{name}")
+    sheet_name = _safe_sheet(f"EBITDA_{name}")
     ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
 
     _write_header(ws, f"Операционная рентабельность — {name}", "EBITDA margin, %")
@@ -473,10 +435,8 @@ def _sheet_ebitda(wb, name, data, months):
     for c in range(2, 2 + len(months)):
         ws.cell(row=5, column=c).number_format = '0.00%'
 
-    data_ref = Reference(ws, min_col=2, max_col=1 + len(months),
-                         min_row=4, max_row=5)
-    cats = Reference(ws, min_col=2, max_col=1 + len(months),
-                     min_row=4, max_row=4)
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=5)
+    cats = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=4)
 
     chart = LineChart()
     chart.add_data(data_ref, titles_from_data=True)
@@ -489,11 +449,8 @@ def _sheet_ebitda(wb, name, data, months):
     ws.add_chart(chart, "A9")
 
 
-# ------------------------------------------------------------
-# Лист: Доля ФОТ (линия)
-# ------------------------------------------------------------
 def _sheet_fot(wb, name, data, months):
-    sheet_name = _safe_sheet_name(f"Доля_ФОТ_{name}")
+    sheet_name = _safe_sheet(f"Доля_ФОТ_{name}")
     ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
 
     _write_header(ws, f"Доля ФОТ в выручке — {name}", "%")
@@ -502,7 +459,8 @@ def _sheet_fot(wb, name, data, months):
     for m in months:
         rev = data["revenue"][m]
         fot = data["fot"][m]
-        shares[m] = round(fot / rev, 4) if rev else 0.0
+        # ФОТ в файле отрицательный — берём модуль
+        shares[m] = round(abs(fot) / rev, 4) if rev else 0.0
 
     headers = ["Показатель"] + [_MONTHS_RU_CAP[m] for m in months]
     rows = [["Доля ФОТ"] + [shares[m] for m in months]]
@@ -511,10 +469,8 @@ def _sheet_fot(wb, name, data, months):
     for c in range(2, 2 + len(months)):
         ws.cell(row=5, column=c).number_format = '0.00%'
 
-    data_ref = Reference(ws, min_col=2, max_col=1 + len(months),
-                         min_row=4, max_row=5)
-    cats = Reference(ws, min_col=2, max_col=1 + len(months),
-                     min_row=4, max_row=4)
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=5)
+    cats = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=4)
 
     chart = LineChart()
     chart.add_data(data_ref, titles_from_data=True)
@@ -533,19 +489,14 @@ def _sheet_fot(wb, name, data, months):
 
 def build_presentation_data(opiu_path, bdr_path, forecast_path,
                             year, month, output_path):
-    """
-    Собирает Excel-файл с диаграммами для презентации.
-
-    opiu_path     — путь к ОПиУ 01.{year}-{month}.{year}.xlsx
-    bdr_path      — путь к БДиР (пока не используется)
-    forecast_path — путь к Прогнозам (пока не используется)
-    year, month   — отчётный год и месяц
-    output_path   — куда сохранить итоговый Excel
-    """
     months = list(range(1, month + 1))
 
-    parsed = _parse_opiu(opiu_path, months)
-    units = parsed["units"]
+    rows, month_col = _read_flat_rows(opiu_path, months)
+    if not rows:
+        print("[presentation_builder] нет данных — файл пустой")
+        return output_path
+
+    units = _collect_units(rows, months)
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -554,23 +505,20 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         u = units.get(unit_name)
         if not u:
             continue
-
         _sheet_revenue_profit(wb, unit_name, u, months)
         _sheet_ebitda(wb, unit_name, u, months)
         _sheet_fot(wb, unit_name, u, months)
 
-    # Отдельные листы по объектам Латвии
     if "Latvia" in units:
         latvia = units["Latvia"]
-        for obj_full_name, obj_short in _LATVIA_OBJECTS:
-            obj = latvia["objects"].get(obj_full_name)
+        for obj_full, obj_short in _LATVIA_OBJECTS:
+            obj = latvia["objects"].get(obj_full)
             if not obj:
                 continue
             _sheet_revenue_profit(wb, obj_short, obj, months)
             _sheet_ebitda(wb, obj_short, obj, months)
             _sheet_fot(wb, obj_short, obj, months)
 
-        # Блок «Коммерческие»
         commercial = latvia["objects"].get("Коммерческие помещения LV")
         if commercial:
             _sheet_revenue_profit(wb, "Коммерческие", commercial, months)
