@@ -334,6 +334,81 @@ def _collect_units(rows, months):
     }
     """
 
+    units = {u: {
+        "revenue": {m: 0.0 for m in months},
+        "net":     {m: 0.0 for m in months},
+        "fot":     {m: 0.0 for m in months},
+        "objects": {},
+    } for u in _UNITS}
+
+    # --- 1. Собираем объекты уровня 2 ---
+    cur_section = None
+    cur_unit = None
+    for r, lvl, title, values in rows:
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            continue
+        if lvl == 1:
+            cur_unit = title
+            continue
+        if (lvl == 2
+                and cur_section in (_SECTION_REVENUE, _SECTION_NET)
+                and cur_unit in _UNITS):
+            if title not in units[cur_unit]["objects"]:
+                units[cur_unit]["objects"][title] = {
+                    "revenue": {m: 0.0 for m in months},
+                    "net":     {m: 0.0 for m in months},
+                    "fot":     {m: 0.0 for m in months},
+                }
+
+    # --- 2. Выручка и ЧП для каждого объекта ---
+    for u_name, u in units.items():
+        for obj_name in list(u["objects"].keys()):
+            rev_vals = _find_row(rows, _SECTION_REVENUE, u_name,
+                                 object_name=obj_name)
+            net_vals = _find_row(rows, _SECTION_NET, u_name,
+                                 object_name=obj_name)
+            for m in months:
+                u["objects"][obj_name]["revenue"][m] = rev_vals.get(m, 0.0)
+                u["objects"][obj_name]["net"][m]     = net_vals.get(m, 0.0)
+
+    # --- 3. ФОТ по объектам (производственный + коммерческий) ---
+    for u_name, u in units.items():
+        for obj_name in list(u["objects"].keys()):
+            fot_prod = _find_object_fot(rows, _SECTION_PROD, u_name, obj_name)
+            fot_comm = _find_object_fot(rows, _SECTION_COMM, u_name, obj_name)
+            for m in months:
+                u["objects"][obj_name]["fot"][m] = (
+                    fot_prod.get(m, 0.0) + fot_comm.get(m, 0.0)
+                )
+
+    # --- 4. Агрегаты юнита = СУММА по всем его объектам ---
+    for u_name, u in units.items():
+        for m in months:
+            u["revenue"][m] = sum(obj["revenue"][m] for obj in u["objects"].values())
+            u["net"][m]     = sum(obj["net"][m]     for obj in u["objects"].values())
+            u["fot"][m]     = sum(obj["fot"][m]     for obj in u["objects"].values())
+
+    # --- 5. Виртуальный юнит «Коммерческие» для Латвии ---
+    if "Latvia" in units:
+        latvia = units["Latvia"]
+        commercial = {
+            "revenue": {m: 0.0 for m in months},
+            "net":     {m: 0.0 for m in months},
+            "fot":     {m: 0.0 for m in months},
+        }
+        for obj_name in _LATVIA_COMMERCIAL:
+            obj = latvia["objects"].get(obj_name)
+            if not obj:
+                continue
+            for m in months:
+                commercial["revenue"][m] += obj["revenue"][m]
+                commercial["net"][m]     += obj["net"][m]
+                commercial["fot"][m]     += obj["fot"][m]
+        latvia["objects"]["Коммерческие помещения LV"] = commercial
+
+    return units
 
 # ============================================================
 # ПОСТРОЕНИЕ ЛИСТОВ EXCEL
@@ -487,6 +562,10 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         return output_path
 
     units = _collect_units(rows, months)
+    if not units:
+        print("[presentation_builder] _collect_units вернул пусто — "
+              "нет данных для диаграмм")
+        return output_path
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
