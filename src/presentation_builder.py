@@ -54,7 +54,7 @@ _LATVIA_OBJECTS = [
     ("AN14 Антониас 14 (дом + парковка)", "Антонияс", 10),
     ("AC89 Чака 89 (дом + парковка)",     "Чака",     15),
     ("M81 - Matisa 81",                    "Матиса",   32),
-    ("EKS_Esporta iela 12-113",            "Эспорта",  33),
+    ("EKS_Esporta iela 12-113",            "Эспорта",  28),
 ]
 
 # Коммерческие объекты Латвии (собираем в один виртуальный блок)
@@ -648,6 +648,67 @@ def _parse_bdr_plan(bdr_path, unit_name, months):
 
     return result
 
+def _parse_bdr_plan_object(bdr_path, unit_name, object_name, months):
+    """
+    Ищет план ЧП ОБЪЕКТА в БДиР.
+
+    Структура БДиР:
+      Чистая прибыль (level 0)
+      · Latvia       (level 1 — юнит)
+      ·· AN14 ...    (level 2 — объект)
+    """
+    result = {m: 0.0 for m in months}
+    if not bdr_path or not os.path.exists(bdr_path):
+        return result
+
+    wb = openpyxl.load_workbook(bdr_path, data_only=True)
+    ws = wb.active
+
+    header_row = None
+    for r in range(1, 6):
+        hits = 0
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            sv = str(v).lower()
+            if any(m in sv for m in _MONTHS_RU_LOWER.values()):
+                hits += 1
+        if hits >= 3:
+            header_row = r
+            break
+
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    cur_section = None
+    cur_unit = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            continue
+        if lvl == 1:
+            cur_unit = title
+            continue
+        if (lvl == 2
+                and cur_section == "Чистая прибыль"
+                and cur_unit == unit_name
+                and title == object_name):
+            for m, col in month_col.items():
+                result[m] = _num(ws, r, col)
+            return result
+
+    return result
+
 def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
                      data_plan, data_fact, months):
     """
@@ -837,7 +898,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 "Антонияс": 11,
                 "Чака":     16,
                 "Матиса":   33,
-                "Эспорта":  34,
+                "Эспорта":  29,
             }
             ebitda_color_map = {
                 "Антонияс": _COLOR_LINE_RED,
@@ -874,6 +935,36 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                     months=months,
                 )
 
+            # ----------------------------------------------------
+            # План/Факт по ЧП объекта Латвии
+            # ----------------------------------------------------
+            # Для Эспорты в БДиР нет плана — все значения плана будут нулевые.
+            # Так и задумано: объект открылся только в августе 2026.
+            sl_plan_fact_obj_map = {
+                "Антонияс": 12,
+                "Чака":     17,
+                "Матиса":   34,
+                "Эспорта":  30,
+            }
+            sl_plan_fact_obj = sl_plan_fact_obj_map.get(obj_short, 0)
+
+            if sl_plan_fact_obj:
+                # Пытаемся получить план из БДиР.
+                # Если файла нет или строка не найдена — вернётся словарь нулей.
+                plan_obj = _parse_bdr_plan_object(
+                    bdr_path, "Latvia", obj_full, months
+                )
+                _sheet_plan_fact(
+                    wb,
+                    sheet_title=_sheet_name_with_slide(
+                        sl_plan_fact_obj, f"ПланФакт_{obj_short}"),
+                    chart_title=f"Выполнение годового плана по ЧП {obj_short}",
+                    subtitle=f"План (БДиР) vs Факт (ОПиУ) — {obj_short}",
+                    data_plan=plan_obj,
+                    data_fact=obj["net"],
+                    months=months,
+                )
+
         # ----------------------------------------------------
         # 3. Блок «Коммерческие»
         # ----------------------------------------------------
@@ -898,6 +989,32 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 subtitle="EBITDA margin Коммерческие, %",
                 line_color=_COLOR_LINE_YEL,
                 data=commercial,
+                months=months,
+            )
+
+            # План/Факт по Коммерческим (слайд 22)
+            plan_comm = _parse_bdr_plan_object(
+                bdr_path, "Latvia", "Коммерческие помещения LV", months
+            )
+            # В БДиР «Коммерческие» — это сумма по объектам;
+            # чтобы получить её, суммируем по каждому коммерческому объекту.
+            if not any(abs(v) > 0.01 for v in plan_comm.values()):
+                # Пробуем сумму по каждому объекту из _LATVIA_COMMERCIAL
+                for obj_comm in _LATVIA_COMMERCIAL:
+                    part = _parse_bdr_plan_object(
+                        bdr_path, "Latvia", obj_comm, months
+                    )
+                    for m in months:
+                        plan_comm[m] += part.get(m, 0.0)
+
+            _sheet_plan_fact(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    22, "ПланФакт_Коммерческие"),
+                chart_title="Выполнение годового плана по ЧП Коммерческие Латвия",
+                subtitle="План (БДиР) vs Факт (ОПиУ) — Коммерческие",
+                data_plan=plan_comm,
+                data_fact=commercial["net"],
                 months=months,
             )
 
@@ -933,13 +1050,11 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
 
 def _sort_sheets_by_slide_number(wb):
     """
-    Пересортировывает листы книги по номеру слайда,
-    который зашит в имени листа (например, «Сл04_ОПиУ_Latvia»).
+    Пересортировывает листы книги по номеру слайда в имени листа.
 
-    Принцип:
-      - вытаскиваем из имени листа число после «Сл» (2 цифры);
-      - сортируем листы по этому числу;
-      - переустанавливаем wb._sheets в новом порядке.
+    Использует wb.move_sheet() — официальный API openpyxl.
+    Приём `wb._sheets = ...` не работает в свежих версиях openpyxl,
+    потому что листы хранятся как связный список внутри workbook.
     """
     import re as _re
 
@@ -951,7 +1066,16 @@ def _sort_sheets_by_slide_number(wb):
         return (1, 10**9, ws.title)
 
     try:
-        sorted_sheets = sorted(wb.worksheets, key=_slide_key)
-        wb._sheets = sorted_sheets
+        desired = sorted(wb.worksheets, key=_slide_key)
+
+        for target_index, ws in enumerate(desired):
+            cur_index = wb.worksheets.index(ws)
+            if cur_index != target_index:
+                # Сдвигаем лист на позицию target_index
+                offset = target_index - cur_index
+                wb.move_sheet(ws, offset=offset)
+
+        print(f"[presentation_builder] листы отсортированы, порядок: "
+              f"{[ws.title[:8] for ws in wb.worksheets]}")
     except Exception as e:
         print(f"[presentation_builder] не удалось отсортировать листы: {e}")
