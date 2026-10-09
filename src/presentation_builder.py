@@ -228,24 +228,16 @@ _SECTION_PROD    = "Производственные расходы"
 _SECTION_COMM    = "Коммерческие расходы"
 
 
-def _find_row(rows, section, unit, object_name=None, level_expected=None):
+def _find_row(rows, section, unit, object_name=None):
     """
     Возвращает словарь {month: value} для строки, которая находится:
       - в секции `section` (level 0),
       - затем идёт `unit` (level 1, точное совпадение),
-      - затем, если задан, `object_name` (level 2, точное совпадение),
-      - и сама строка имеет уровень `level_expected`.
+      - затем, если задан `object_name`, — `object_name` (level 2),
+        и сама строка имеет уровень 1 (если object_name=None)
+        или уровень 2 (если object_name задан).
 
-    Логика:
-      - проходим список rows по порядку;
-      - отслеживаем текущую секцию (level 0),
-        текущего юнита (level 1),
-        текущий объект (level 2);
-      - когда все три совпали и уровень строки = level_expected —
-        возвращаем значения.
-
-    Если object_name=None, ищем строку, у которой level == 1
-    (юнит) в нужной секции.
+    Если ничего не найдено — возвращает {}.
     """
     cur_section = None
     cur_unit = None
@@ -258,17 +250,9 @@ def _find_row(rows, section, unit, object_name=None, level_expected=None):
             cur_object = None
             continue
 
-        # Секция сменилась — прерываемся, если уже нашли нужное
-        if cur_section != section:
-            if cur_section is not None and cur_section != section:
-                # Возможно, мы ушли из нужной секции — но могли
-                # вернуться позже. Просто продолжаем.
-                pass
-
         if lvl == 1:
             cur_unit = title
             cur_object = None
-            # Проверяем: может, это искомая строка (юнит без объекта)
             if (object_name is None
                     and cur_section == section
                     and cur_unit == unit):
@@ -277,8 +261,14 @@ def _find_row(rows, section, unit, object_name=None, level_expected=None):
 
         if lvl == 2:
             cur_object = title
-            # Юнит и объект без секции нам не подходят
+            if (object_name is not None
+                    and cur_section == section
+                    and cur_unit == unit
+                    and cur_object == object_name):
+                return dict(values)
             continue
+
+        # Уровень 3+ нам не интересен для поиска revenue/net
 
     return {}
 
