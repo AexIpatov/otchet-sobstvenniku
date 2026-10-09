@@ -20,6 +20,7 @@ import datetime as _dt
 
 import openpyxl
 from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.label import DataLabelList
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 import config
@@ -507,93 +508,225 @@ def _sheet_revenue_profit(wb, name, data, months):
     sheet_name = _safe_sheet(f"ОПиУ_{name}")
     ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
 
-    _write_header(ws, f"ОПиУ {name}", "Выручка и чистая прибыль по месяцам")
+    _write_header(ws, f"ОПиУ {name}", "Выручка & Чистая прибыль, без НДС")
 
-    headers = ["Показатель"] + [_MONTHS_RU_CAP[m] for m in months]
-    rows = [
-        ["Выручка"]         + [round(data["revenue"][m], 2) for m in months],
-        ["Чистая прибыль"]  + [round(data["net"][m], 2)     for m in months],
-    ]
-    _write_table(ws, 4, headers, rows)
+    # Таблица перевёрнута: строка = месяц, колонки = показатели.
+    # Это нужно, чтобы BarChart взял серии из СТОЛБЦОВ
+    # (Выручка, ЧП), а месяцы — как категории по оси X.
+    header_row = 4
+    headers = ["Месяц", "Выручка", "Чистая прибыль"]
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
 
-    data_ref = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=6)
-    cats = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=4)
+    for i, m in enumerate(months):
+        r = header_row + 1 + i
+        c1 = ws.cell(row=r, column=1, value=_MONTHS_RU_CAP[m])
+        c2 = ws.cell(row=r, column=2, value=round(data["revenue"][m], 2))
+        c3 = ws.cell(row=r, column=3, value=round(data["net"][m], 2))
+        for c in (c1, c2, c3):
+            c.border = _CELL_BORDER
+        c2.number_format = '#,##0'
+        c3.number_format = '#,##0'
+
+    # Категории — колонка A (месяцы)
+    cats = Reference(
+        ws,
+        min_col=1,
+        min_row=header_row + 1,
+        max_row=header_row + len(months),
+    )
+    # Данные — колонки B..C, серии берём из заголовков (header_row)
+    data_ref = Reference(
+        ws,
+        min_col=2, max_col=3,
+        min_row=header_row,
+        max_row=header_row + len(months),
+    )
 
     chart = BarChart()
     chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
     chart.add_data(data_ref, titles_from_data=True)
     chart.set_categories(cats)
-    _style_bar(chart, f"Выручка и ЧП — {name}")
+
+    chart.title = f"Выручка и ЧП — {name}"
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    # Цвета: Выручка — жёлтый, ЧП — зелёный
     chart.series[0].graphicalProperties.solidFill = _COLOR_REVENUE
+    chart.series[0].graphicalProperties.line.solidFill = _COLOR_REVENUE
     chart.series[1].graphicalProperties.solidFill = _COLOR_NET
-    ws.add_chart(chart, "A9")
+    chart.series[1].graphicalProperties.line.solidFill = _COLOR_NET
+
+    # Подписи значений над столбиками
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    # Легенда снизу
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
 
 
 def _sheet_ebitda(wb, name, data, months):
     sheet_name = _safe_sheet(f"EBITDA_{name}")
     ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
 
-    _write_header(ws, f"Операционная рентабельность — {name}", "EBITDA margin, %")
+    _write_header(
+        ws,
+        f"Операционная рентабельность (EBITDA margin) {name}",
+        "EBITDA margin, %",
+    )
 
-    margins = {}
-    for m in months:
+    header_row = 4
+    headers = ["Месяц", "EBITDA margin"]
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+
+    for i, m in enumerate(months):
+        r = header_row + 1 + i
         rev = data["revenue"][m]
         net = data["net"][m]
-        margins[m] = round(net / rev, 4) if rev else 0.0
+        margin = (net / rev) if rev else 0.0
 
-    headers = ["Показатель"] + [_MONTHS_RU_CAP[m] for m in months]
-    rows = [["EBITDA margin"] + [margins[m] for m in months]]
-    _write_table(ws, 4, headers, rows)
+        c1 = ws.cell(row=r, column=1, value=_MONTHS_RU_CAP[m])
+        c2 = ws.cell(row=r, column=2, value=round(margin, 4))
+        for c in (c1, c2):
+            c.border = _CELL_BORDER
+        c2.number_format = '0.0%'
 
-    for c in range(2, 2 + len(months)):
-        ws.cell(row=5, column=c).number_format = '0.00%'
-
-    data_ref = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=5)
-    cats = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=4)
+    cats = Reference(
+        ws,
+        min_col=1,
+        min_row=header_row + 1,
+        max_row=header_row + len(months),
+    )
+    data_ref = Reference(
+        ws,
+        min_col=2, max_col=2,
+        min_row=header_row,
+        max_row=header_row + len(months),
+    )
 
     chart = LineChart()
     chart.add_data(data_ref, titles_from_data=True)
     chart.set_categories(cats)
-    _style_line(chart, f"EBITDA margin — {name}")
+    chart.title = f"Операционная рентабельность (EBITDA margin) {name}"
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
     chart.series[0].graphicalProperties.line.solidFill = _COLOR_LINE_1
     chart.series[0].graphicalProperties.line.width = 25000
     chart.series[0].smooth = True
-    chart.y_axis.numFmt = '0%'
-    ws.add_chart(chart, "A9")
+    chart.y_axis.numFmt = '0.0%'
+
+    # Подписи значений
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend = None   # линия одна — легенда не нужна
+
+    ws.add_chart(chart, "E4")
 
 
 def _sheet_fot(wb, name, data, months):
     sheet_name = _safe_sheet(f"Доля_ФОТ_{name}")
     ws = wb.create_sheet(sheet_name) if sheet_name not in wb.sheetnames else wb[sheet_name]
 
-    _write_header(ws, f"Доля ФОТ в выручке — {name}", "%")
+    _write_header(
+        ws,
+        f"Доля ФОТ в выручке — {name}",
+        "%",
+    )
 
-    shares = {}
-    for m in months:
+    header_row = 4
+    headers = ["Месяц", "Доля ФОТ"]
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+
+    for i, m in enumerate(months):
+        r = header_row + 1 + i
         rev = data["revenue"][m]
         fot = data["fot"][m]
-        # ФОТ в файле отрицательный — берём модуль
-        shares[m] = round(abs(fot) / rev, 4) if rev else 0.0
+        share = (abs(fot) / rev) if rev else 0.0
 
-    headers = ["Показатель"] + [_MONTHS_RU_CAP[m] for m in months]
-    rows = [["Доля ФОТ"] + [shares[m] for m in months]]
-    _write_table(ws, 4, headers, rows)
+        c1 = ws.cell(row=r, column=1, value=_MONTHS_RU_CAP[m])
+        c2 = ws.cell(row=r, column=2, value=round(share, 4))
+        for c in (c1, c2):
+            c.border = _CELL_BORDER
+        c2.number_format = '0.0%'
 
-    for c in range(2, 2 + len(months)):
-        ws.cell(row=5, column=c).number_format = '0.00%'
-
-    data_ref = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=5)
-    cats = Reference(ws, min_col=2, max_col=1 + len(months), min_row=4, max_row=4)
+    cats = Reference(
+        ws,
+        min_col=1,
+        min_row=header_row + 1,
+        max_row=header_row + len(months),
+    )
+    data_ref = Reference(
+        ws,
+        min_col=2, max_col=2,
+        min_row=header_row,
+        max_row=header_row + len(months),
+    )
 
     chart = LineChart()
     chart.add_data(data_ref, titles_from_data=True)
     chart.set_categories(cats)
-    _style_line(chart, f"Доля ФОТ — {name}")
+    chart.title = f"Доля ФОТ в выручке — {name}"
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
     chart.series[0].graphicalProperties.line.solidFill = _COLOR_LINE_2
     chart.series[0].graphicalProperties.line.width = 25000
     chart.series[0].smooth = True
-    chart.y_axis.numFmt = '0%'
-    ws.add_chart(chart, "A9")
+    chart.y_axis.numFmt = '0.0%'
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend = None
+
+    ws.add_chart(chart, "E4")
 
 
 # ============================================================
