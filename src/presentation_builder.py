@@ -276,41 +276,89 @@ def _find_row(rows, section, unit, object_name=None):
 def _find_object_fot(rows, section, unit, object_name):
     """
     Возвращает {month: value} для ФОТ объекта.
-    ФОТ — строка уровня 4 (···) с текстом, содержащим «ФОТ
-    производственного персонала» или «ФОТ коммерческого персонала»,
-    внутри блока ·· <object_name> внутри · <unit> в секции `section`.
+
+    Ищем строку с текстом «ФОТ производственного персонала» или
+    «ФОТ коммерческого персонала» внутри блока объекта
+    `object_name`, который находится в юните `unit` в секции `section`.
+
+    ВАЖНО: в разных секциях уровни «·» разные!
+
+      - В секции «Выручка»:
+          · Latvia              ← level 1 (юнит)
+          ·· AN14 Антониас 14   ← level 2 (объект)
+
+      - В секции «Производственные расходы»:
+          · Прямые производственные    ← level 1 (подсекция)
+          ·· Latvia                     ← level 2 (юнит!)
+          ··· AN14 Антониас 14          ← level 3 (объект!)
+          ···· ФОТ производственного    ← level 4
+
+    Поэтому НЕЛЬЗЯ жёстко завязываться на уровень: ищем по ИМЕНАМ
+    с любой вложенностью.
+
+    Алгоритм:
+      1. Находим строку с именем == unit (в любой позиции).
+      2. После неё находим строку с именем == object_name.
+      3. После неё — все строки, содержащие «фот производственного»
+         или «фот коммерческого», пока не встретим строку, которая
+         «выше» объекта по уровню (или новый объект того же уровня).
     """
-    cur_section = None
-    cur_unit = None
-    cur_object = None
     result = {}
 
-    for r, lvl, title, values in rows:
-        if lvl == 0:
-            cur_section = title
-            cur_unit = None
-            cur_object = None
-            continue
-        if lvl == 1:
-            cur_unit = title
-            cur_object = None
-            continue
-        if lvl == 2:
-            cur_object = title
-            continue
+    # 1) Находим индекс строки с именем юнита
+    unit_idx = None
+    for i, (r, lvl, title, values) in enumerate(rows):
+        if title == unit:
+            # Убеждаемся, что мы всё ещё в нужной секции
+            # (проверяем, что выше нас в rows есть section и нет
+            # другой секции между ними).
+            if _is_inside_section(rows, i, section):
+                unit_idx = i
+                break
+    if unit_idx is None:
+        return result
 
-        # Уровень 3+ внутри объекта
-        if (cur_section == section
-                and cur_unit == unit
-                and cur_object == object_name
-                and lvl >= 3):
-            tl = title.lower()
-            if "фот производственного" in tl or \
-               "фот коммерческого" in tl:
-                for m, v in values.items():
-                    result[m] = result.get(m, 0.0) + v
+    # 2) После юнита находим объект
+    obj_idx = None
+    for i in range(unit_idx + 1, len(rows)):
+        r, lvl, title, values = rows[i]
+        # Если встретили новую секцию — стоп
+        if lvl == 0 and title != section:
+            break
+        if title == object_name:
+            obj_idx = i
+            break
+    if obj_idx is None:
+        return result
+
+    obj_lvl = rows[obj_idx][1]
+
+    # 3) После объекта собираем все ФОТ-строки, пока не вышли из блока объекта
+    for i in range(obj_idx + 1, len(rows)):
+        r, lvl, title, values = rows[i]
+        # Вышли из объекта — уровень ≤ уровня объекта
+        if lvl <= obj_lvl:
+            break
+        # Новая секция — стоп
+        if lvl == 0 and title != section:
+            break
+
+        tl = title.lower()
+        if "фот производственного" in tl or "фот коммерческого" in tl:
+            for m, v in values.items():
+                result[m] = result.get(m, 0.0) + v
 
     return result
+
+
+def _is_inside_section(rows, idx, section):
+    """Проверяет, что строка idx находится в секции `section`
+    (level 0), а не в другой секции."""
+    for i in range(idx - 1, -1, -1):
+        r, lvl, title, values = rows[i]
+        if lvl == 0:
+            return title == section
+    return False
 
 
 # ============================================================
