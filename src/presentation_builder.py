@@ -917,6 +917,41 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             months=months,
         )
 
+    # --------------------------------------------------------
+    # СОРТИРОВКА ЛИСТОВ ПО НОМЕРАМ СЛАЙДОВ ПРЕЗЕНТАЦИИ
+    # --------------------------------------------------------
+    # В процессе создания листы добавляются в порядке вызовов
+    # функций, и он не совпадает с порядком слайдов в презентации
+    # (например, для East-Восток: 38, 42, 40, 41).
+    # Пересортировываем вкладки по числу после «Сл».
+    _sort_sheets_by_slide_number(wb)
+
     wb.save(output_path)
     print(f"[OK] Диаграммы сохранены: {output_path}")
     return output_path
+
+
+def _sort_sheets_by_slide_number(wb):
+    """
+    Пересортировывает листы книги по номеру слайда,
+    который зашит в имени листа (например, «Сл04_ОПиУ_Latvia»).
+
+    Принцип:
+      - вытаскиваем из имени листа число после «Сл» (2 цифры);
+      - сортируем листы по этому числу;
+      - переустанавливаем wb._sheets в новом порядке.
+    """
+    import re as _re
+
+    def _slide_key(ws):
+        m = _re.search(r"Сл(\d+)", ws.title)
+        if m:
+            return (0, int(m.group(1)), ws.title)
+        # Листы без номера слайда — в конец
+        return (1, 10**9, ws.title)
+
+    try:
+        sorted_sheets = sorted(wb.worksheets, key=_slide_key)
+        wb._sheets = sorted_sheets
+    except Exception as e:
+        print(f"[presentation_builder] не удалось отсортировать листы: {e}")
