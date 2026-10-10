@@ -21,6 +21,11 @@ from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.chart.label import DataLabelList
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.drawing.spreadsheet_drawing import (
+    OneCellAnchor, AnchorMarker,
+)
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.utils.units import cm_to_EMU
 
 import config
 
@@ -1401,33 +1406,22 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
                                 data_plan, data_fact, months,
                                 plan_label, fact_label):
     """
-    Лист «Нарастающим итогом» — горизонтальная диаграмма с
-    накоплениями (stacked bar chart).
-
-    Порядок операций ВАЖЕН:
-      1. Сначала пишем данные и запоминаем их диапазоны.
-      2. Затем добавляем диаграмму, привязывая к видимым ячейкам.
-      3. Только ПОСЛЕ этого скрываем служебные строки.
-      4. Иначе openpyxl/Excel может отрисовать диаграмму нулевой высоты.
+    Лист «Нарастающим итогом» — горизонтальная stacked-диаграмма.
+    План сверху, Факт снизу.
     """
     ws = wb.create_sheet(sheet_title)
 
     # ---- 1. Данные для диаграммы ----
-    # Строка 2 — шапка (названия месяцев).
-    # Строка 3 — Факт (окажется ВНИЗУ диаграммы).
-    # Строка 4 — План (окажется СВЕРХУ диаграммы).
-    header_row = 2
-    fact_row   = 3
-    plan_row   = 4
+    header_row = 2   # шапка (названия месяцев)
+    fact_row   = 3   # Факт (окажется ВНИЗУ диаграммы)
+    plan_row   = 4   # План (окажется СВЕРХУ диаграммы)
 
     ws.cell(row=header_row, column=1, value="Показатель").font = Font(bold=True)
     for i, m in enumerate(months, start=2):
         ws.cell(row=header_row, column=i,
                 value=_MONTHS_RU_LOWER[m].capitalize()).font = Font(bold=True)
 
-    # Строка 3 — Факт
     ws.cell(row=fact_row, column=1, value=fact_label).font = Font(bold=True)
-    # Строка 4 — План
     ws.cell(row=plan_row, column=1, value=plan_label).font = Font(bold=True)
 
     for i, m in enumerate(months, start=2):
@@ -1481,9 +1475,27 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     chart.legend.position = "t"
     chart.legend.overlay = False
 
-    # ВАЖНО: сначала добавляем диаграмму, потом скрываем строки.
-    # Якорь — на видимую пустую ячейку A6 (строки 2-4 ещё не скрыты).
-    ws.add_chart(chart, "A6")
+    # ВАЖНО: используем абсолютный якорь вместо "A6".
+    # Строковый якорь иногда «съезжает» в скрытые строки
+    # и openpyxl на этапе save() выбрасывает диаграмму.
+    from openpyxl.utils import column_index_from_string
+    anchor_col_idx = column_index_from_string("A") - 1   # 0-based
+    anchor_row_idx = 6 - 1                              # 0-based, строка 6
+    anchor = OneCellAnchor(
+        _from=AnchorMarker(
+            col=anchor_col_idx,
+            colOff=0,
+            row=anchor_row_idx,
+            rowOff=0,
+        ),
+        ext=XDRPositiveSize2D(
+            cx=cm_to_EMU(chart.width),
+            cy=cm_to_EMU(chart.height),
+        ),
+    )
+    chart.anchor = anchor
+
+    ws.add_chart(chart)
 
     # ---- 3. Блок итогов справа ----
     sum_plan = sum(float(data_plan.get(m, 0.0) or 0.0) for m in months)
@@ -1505,13 +1517,12 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         c_val.border = _CELL_BORDER
         c_val.number_format = fmt
 
-    # Ширина колонок
     ws.column_dimensions["A"].width = 22
     for i in range(2, 2 + len(months)):
         ws.column_dimensions[get_column_letter(i)].width = 10
     ws.column_dimensions[get_column_letter(box_col)].width = 14
 
-    # ---- 4. Скрываем служебные строки (ПОСЛЕ add_chart) ----
+    # ---- 4. Скрываем строки с данными (ПОСЛЕ add_chart) ----
     for r in (header_row, fact_row, plan_row):
         ws.row_dimensions[r].hidden = True
 
