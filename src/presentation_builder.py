@@ -1430,24 +1430,31 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     # Каждый столбец B..N — серия (один месяц).
     # Категории — строки 4 и 5 (План и Факт).
     header_row = 3
-    plan_row   = 4
-    fact_row   = 5
+    # ВАЖНО: для chart.type="bar" openpyxl рисует категории снизу вверх.
+    # Чтобы на диаграмме План был СВЕРХУ, а Факт — СНИЗУ,
+    # размещаем данные в обратном порядке:
+    #   строка 4 (верхняя в таблице) → Факт (окажется внизу диаграммы)
+    #   строка 5 (нижняя в таблице)  → План (окажется сверху диаграммы)
+    fact_row   = 4
+    plan_row   = 5
 
     ws.cell(row=header_row, column=1, value="Показатель").font = Font(bold=True)
     for i, m in enumerate(months, start=2):
         ws.cell(row=header_row, column=i,
                 value=_MONTHS_RU_LOWER[m].capitalize()).font = Font(bold=True)
 
-    ws.cell(row=plan_row, column=1, value=plan_label).font = Font(bold=True)
+    # Строка 4 — Факт
     ws.cell(row=fact_row, column=1, value=fact_label).font = Font(bold=True)
+    # Строка 5 — План
+    ws.cell(row=plan_row, column=1, value=plan_label).font = Font(bold=True)
 
     for i, m in enumerate(months, start=2):
-        pc = ws.cell(row=plan_row, column=i,
-                     value=float(data_plan.get(m, 0.0) or 0.0))
-        pc.number_format = '#,##0'
         fc = ws.cell(row=fact_row, column=i,
                      value=float(data_fact.get(m, 0.0) or 0.0))
         fc.number_format = '#,##0'
+        pc = ws.cell(row=plan_row, column=i,
+                     value=float(data_plan.get(m, 0.0) or 0.0))
+        pc.number_format = '#,##0'
 
     # ---- 3. Горизонтальная линейчатая диаграмма с накоплениями ----
     chart = BarChart()
@@ -1461,10 +1468,14 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         min_col=2, max_col=1 + len(months),
         min_row=header_row, max_row=fact_row,
     )
+    # Категории идут снизу вверх для chart.type="bar".
+    # Чтобы в легенде «План» был сверху, а «Факт» — снизу,
+    # диапазон берём от fact_row (верхняя строка таблицы = нижняя на диаграмме)
+    # до plan_row (нижняя строка таблицы = верхняя на диаграмме).
     cats_ref = Reference(
         ws,
         min_col=1,
-        min_row=plan_row, max_row=fact_row,
+        min_row=fact_row, max_row=plan_row,
     )
 
     chart.add_data(data_ref, titles_from_data=True)
