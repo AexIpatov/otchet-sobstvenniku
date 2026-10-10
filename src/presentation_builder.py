@@ -80,6 +80,7 @@ _LATVIA_COMMERCIAL = [
     "SK3-Skunju 3",
     "UK_Latvia",
     "V22 К. Валдемара 22",
+    "BRN_Brunieku",              # ← добавлено
 ]
 
 # Номера слайдов для юнитов (первый слайд с ОПиУ каждого юнита)
@@ -2352,6 +2353,10 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         (
             "Коммерческие",
             [
+                # Матиса и Эспорта входят в «Коммерческие»
+                "M81 - Matisa 81 [Latvia]",
+                "EKS_Esporta iela 12-113 [Latvia]",
+                # Остальные коммерческие LV
                 "D4 Парковка-Deglava4 [Latvia]",
                 "AC87 Гараж Чака [Latvia]",
                 "B117 Бривибас, 117 [Latvia]",
@@ -2365,6 +2370,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 "OZ1 Озолниеки [Latvia]",
                 "V22 К. Валдемара 22 [Latvia]",
                 "UK_Latvia [Latvia]",
+                # BRN — 1 евро (в файле вложений его нет, добавляем вручную)
             ],
             "virtual", "Коммерческие помещения LV",
             "FFC000",
