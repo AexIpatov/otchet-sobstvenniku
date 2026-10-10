@@ -1870,30 +1870,59 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
     ws = wb.create_sheet(sheet_title)
     _write_header(ws, chart_title, subtitle)
 
-    # --- Заголовки таблицы ---
-    header_row = 5
-    headers = [
-        "Объекты",
-        "",  # столбец B — пусто
-        "",  # столбец C — пусто
-        "",  # столбец D — пусто
-        "1.2.10.1 Мусор",
-        "1.2.10.2 Газ",
-        "1.2.10.3 Вода",
-        "1.2.10.4 Отопление",
-        "1.2.10.5 Электричество",
-        "1.2.10.6 Коммунальные УК дома",
-        "Всего расходов на коммунальные услуги",
-        "Разница между выставленными счетами и фактическими коммунальными расходами за отчётный месяц",
-        "1.1.2.3 Компенсация по коммунальным расходам — Поступившая на счёт",
-        "Задолженность по возмещению КУ за отчётный месяц",
+    # --- Шапка таблицы: три уровня, как в исходном файле КУ ---
+    # Строка 3 — «EUR» + названия групп столбцов.
+    # Строка 4 — «Объекты» (A) и пустые B..N.
+    # Строка 5 — номера столбцов 1..14.
+    header_row_1 = 3   # группа
+    header_row_2 = 4   # «Объекты»
+    header_row_3 = 5   # номера
+    header_row = header_row_3   # откуда начинаются данные
+
+    # Строка 3: заголовки столбцов
+    row3_headers = [
+        "EUR",                                              # A
+        "Разница между выставленными счетами и фактическими коммунальными расходами с НДС с начала года",  # B
+        "Выставлено в сентябре (за август 2026) арендаторам",  # C
+        "в т.ч. НДС",                                       # D
+        "1.2.10.1 Мусор*",                                  # E
+        "1.2.10.2 Газ*",                                    # F
+        "1.2.10.3 Вода*",                                   # G
+        "1.2.10.4 Отопление*",                              # H
+        "1.2.10.5 Электричество*",                          # I
+        "1.2.10.6 Коммунальные УК дома*",                   # J
+        "Всего расходов на коммунальные услуги*",           # K
+        "Разница между выставленными счетами и фактическими коммунальными расходами за отчётный месяц (гр. 3 -гр.11)",  # L
+        "1.1.2.3 Компенсация по коммунальным расходам-Поступившая на счет",  # M
+        "Задолженность по возмещению КУ за отчётный месяц (гр.13 - гр.3)",  # N
     ]
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row=header_row, column=c, value=h)
+
+    for c, h in enumerate(row3_headers, start=1):
+        cell = ws.cell(row=header_row_1, column=c, value=h)
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
         cell.alignment = Alignment(
             horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+
+    # Строка 4: «Объекты» в A, остальное пусто
+    ws.cell(row=header_row_2, column=1, value="Объекты").fill = _HEADER_FILL
+    ws.cell(row=header_row_2, column=1).font = _HEADER_FONT
+    ws.cell(row=header_row_2, column=1).alignment = Alignment(
+        horizontal="center", vertical="center")
+    ws.cell(row=header_row_2, column=1).border = _CELL_BORDER
+    for c in range(2, 15):
+        cell = ws.cell(row=header_row_2, column=c)
+        cell.fill = _HEADER_FILL
+        cell.border = _CELL_BORDER
+
+    # Строка 5: номера столбцов 1..14
+    for c in range(1, 15):
+        cell = ws.cell(row=header_row_3, column=c, value=c)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center")
         cell.border = _CELL_BORDER
 
     # --- Читаем данные из файла КУ ---
@@ -1975,10 +2004,8 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
         ws.cell(row=total_row, column=1,
                 value="Итого").font = Font(bold=True)
         ws.cell(row=total_row, column=1).border = _CELL_BORDER
-        for c in range(2, 5):
-            ws.cell(row=total_row, column=c).border = _CELL_BORDER
 
-        for c in range(5, 15):
+        for c in range(2, 15):
             v_total = _num(ws_ku, total_src_row, c)
             v_sub   = _num(ws_ku, sub_src_row, c)
             val = round(v_total - v_sub, 2)
@@ -2041,10 +2068,21 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
 
         # Записываем в выходной лист
         ws.cell(row=row_out, column=1, value=obj_name).border = _CELL_BORDER
-        # B, C, D — пустые
-        ws.cell(row=row_out, column=2).border = _CELL_BORDER
-        ws.cell(row=row_out, column=3).border = _CELL_BORDER
-        ws.cell(row=row_out, column=4).border = _CELL_BORDER
+
+        # Столбец B — Разница с начала года (из исходника столбец B)
+        ws.cell(row=row_out, column=2,
+                value=round(_num(ws_ku, r, 2), 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=2).number_format = '#,##0'
+
+        # Столбец C — Выставлено в сентябре (из исходника C)
+        ws.cell(row=row_out, column=3,
+                value=round(_num(ws_ku, r, 3), 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=3).number_format = '#,##0'
+
+        # Столбец D — в т.ч. НДС (из исходника D)
+        ws.cell(row=row_out, column=4,
+                value=round(_num(ws_ku, r, 4), 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=4).number_format = '#,##0'
 
         ws.cell(row=row_out, column=5, value=round(val_musor, 2)).border = _CELL_BORDER
         ws.cell(row=row_out, column=6, value=round(val_gaz, 2)).border = _CELL_BORDER
@@ -2076,11 +2114,11 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
     for c in range(2, 15):
         ws.cell(row=total_row, column=c).border = _CELL_BORDER
 
-    # Формулы для итогов
+    # Формулы для итогов: столбцы B..N
     if data_rows:
         first_data = data_rows[0]
         last_data = data_rows[-1]
-        for c in range(5, 15):  # столбцы E..N
+        for c in range(2, 15):  # столбцы B..N
             col_letter = get_column_letter(c)
             formula = f"=SUM({col_letter}{first_data}:{col_letter}{last_data})"
             cell = ws.cell(row=total_row, column=c, value=formula)
@@ -2088,7 +2126,7 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
             cell.number_format = '#,##0'
             cell.border = _CELL_BORDER
     else:
-        for c in range(5, 15):
+        for c in range(2, 15):
             ws.cell(row=total_row, column=c, value=0).border = _CELL_BORDER
 
     # --- Ширина колонок ---
