@@ -2207,11 +2207,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 fot_prod_total[m] += fp.get(m, 0.0)
                 fot_comm_total[m] += fc.get(m, 0.0)
 
-    # Заглушка: значения из эталонной презентации
-    _fot_share_etalon = {
-        1: 0.316, 2: 0.316, 3: 0.290, 4: 0.303, 5: 0.327,
-        6: 0.299, 7: 0.291, 8: 0.297, 9: 0.310,
-    }
+    # Заглушка: значения из эталонной презентации (доля производственного ФОТ)
     _fot_share_etalon = {
         1: 0.316, 2: 0.316, 3: 0.290, 4: 0.303, 5: 0.327,
         6: 0.299, 7: 0.291, 8: 0.297, 9: 0.310,
@@ -2222,6 +2218,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             "color": "C00000",
             "values": {m: _fot_share_etalon.get(m, 0.0) for m in months},
         },
+        {
             "name": "Доля административного ФОТ",
             "color": "70AD47",
             "values": {m: 0.0 for m in months},
