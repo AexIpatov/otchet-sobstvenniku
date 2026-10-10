@@ -1083,31 +1083,28 @@ def _collect_dds(odds_path, unit_name, months):
     if unit_row is None:
         return result
 
-    # 3) Следующие две числовые строки — поступления и выбытия.
+    # 3) Берём следующие две строки с числами сразу после юнита.
+    #    В ОДДС у Latvia:
+    #      строка N   — юнит «Latvia» (данных нет)
+    #      строка N+1 — АГРЕГАТ поступлений (A пустой, есть числа)
+    #      строка N+2 — АГРЕГАТ выбытий (A пустой, есть числа)
+    #      строка N+3 — первый объект «· AN14 …» (A не пустой)
     #
-    # В ОДДС у этих строк СТОЛБЕЦ A пустой (это агрегаты юнита),
-    # поэтому проверять наличие имени НЕ надо.
-    # Просто берём первые две строки с числами сразу после юнита.
+    # ВАЖНО: определяем «есть ли данные в строке» по месяцам,
+    # а не по столбцу A. A у агрегатов пустой, но не у всех строк.
     collected = 0
     for r in range(unit_row + 1, unit_row + 10):
-        raw = ws.cell(row=r, column=1).value
-
-        # Если встретили ИМЕНОВАННУЮ строку с непустым A
-        # (например, «· AN14 …») — значит, агрегаты уже закончились.
-        if raw is not None:
-            title = _clean(raw)
-            if title:
-                # Непустое имя = начались объекты/статьи → стоп
-                break
-
         vals = {m: _num(ws, r, col) for m, col in month_col.items()}
-        # Пропускаем полностью пустые строки
+
+        # Пропускаем пустые строки (нет чисел по месяцам)
         if not any(v != 0.0 for v in vals.values()):
             continue
 
+        # Первая числовая строка — поступления
         if collected == 0:
             for m in months:
                 result["inflow"][m] = vals.get(m, 0.0) or 0.0
+        # Вторая числовая строка — выбытия (по модулю)
         elif collected == 1:
             for m in months:
                 result["outflow"][m] = abs(vals.get(m, 0.0) or 0.0)
@@ -1653,6 +1650,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
 
         # --- Латвия (слайд 3) — Анализ ДДС ---
         lat_dds = _collect_dds(odds_path, "Latvia", months)
+        print(f"[DDS] Latvia: inflow={lat_dds['inflow']}, outflow={lat_dds['outflow']}")
         if any(lat_dds["inflow"].values()) or any(lat_dds["outflow"].values()):
             _sheet_dds(
                 wb,
