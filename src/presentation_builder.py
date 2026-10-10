@@ -439,14 +439,14 @@ def _parse_debts(debts_path, months):
     """
     Читает файл «таблица Долги и Численность сотрудников.xlsx».
 
-    Структура листа:
-      Строка 1: «Долги по объектам аренды» (заголовок)
-      Строка 2: «Объект» | даты (2026-01-01, 2026-02-01, ...)
-      Строки 3..N: <Объект> | числа по месяцам
-      ... пропуск ...
-      Строка M: «Численность сотрудников Estate»
-      Строка M+1: даты
-      Строка M+2: «Численность сотрудников Estate» | числа
+    Структура (согласно актуальному файлу):
+      • Строка 1: «Долги по объектам аренды» (заголовок)
+      • Строка 2: «Объект» | 2026-01-01 | 2026-02-01 | … (шапка с датами)
+      • Строки 3..N: имя объекта | числа по месяцам
+      • Пустые строки
+      • Строка с «Численность сотрудников Estate» (заголовок)
+      • Следующая строка: даты (2026-01-01 | 2026-02-01 | …)
+      • Следующая строка: «Численность сотрудников Estate» | числа
 
     Возвращает:
       {
@@ -459,33 +459,41 @@ def _parse_debts(debts_path, months):
         "headcount": {m: 0.0 for m in months},
     }
     if not debts_path or not os.path.exists(debts_path):
+        print(f"[_parse_debts] файл не найден: {debts_path}")
         return result
 
     wb = openpyxl.load_workbook(debts_path, data_only=True)
     ws = wb.active
 
-    # Ищем шапку «Объект» + строка с датами
+    print(f"[_parse_debts] лист: {ws.title}, "
+          f"строк: {ws.max_row}, колонок: {ws.max_column}")
+
+    # --- Ищем шапку «Объект» ---
     header_row = None
-    for r in range(1, 15):
+    for r in range(1, min(30, ws.max_row + 1)):
         v = ws.cell(row=r, column=1).value
         if v and "объект" in str(v).lower():
             header_row = r
             break
     if header_row is None:
+        print("[_parse_debts] не найдена шапка «Объект»")
         return result
+    print(f"[_parse_debts] шапка найдена в строке {header_row}")
 
-    # Собираем {month: col} из дат в шапке
+    # --- Собираем {month: col} из дат в шапке ---
     month_col = {}
     for c in range(2, ws.max_column + 1):
         v = ws.cell(row=header_row, column=c).value
         if isinstance(v, (_dt.datetime, _dt.date)):
             if v.month in months:
                 month_col[v.month] = c
+    print(f"[_parse_debts] найдено колонок месяцев: {len(month_col)}")
 
     if not month_col:
+        print("[_parse_debts] в шапке нет дат нужных месяцев")
         return result
 
-    # Идём по строкам данных до строки «Численность...»
+    # --- Идём по строкам данных до строки «Численность...» ---
     headcount_header_row = None
     for r in range(header_row + 1, ws.max_row + 1):
         name = _clean(ws.cell(row=r, column=1).value)
@@ -500,11 +508,17 @@ def _parse_debts(debts_path, months):
             vals[m] = _num(ws, r, col)
         result["debts"][name] = vals
 
-    # Парсим численность — идём после headcount_header_row
+    print(f"[_parse_debts] объектов с долгами: {len(result['debts'])}")
+
+    # --- Парсим численность ---
     if headcount_header_row is not None:
+        # Строка с «Численность сотрудников Estate» (заголовок)
+        # Следующая строка — с датами
+        # Ещё следующая — с числами
         hc_row = headcount_header_row + 2
-        first_val = _clean(ws.cell(row=hc_row, column=1).value)
-        if "численность" not in first_val.lower():
+        v1 = _clean(ws.cell(row=hc_row, column=1).value)
+        if "численность" not in v1.lower():
+            # Пробуем +1
             for rr in range(headcount_header_row + 1,
                             min(headcount_header_row + 5, ws.max_row + 1)):
                 v = _clean(ws.cell(row=rr, column=1).value)
@@ -512,20 +526,26 @@ def _parse_debts(debts_path, months):
                     hc_row = rr
                     break
 
+        # Ищем строку с датами для численности
         hc_month_col = {}
-        for c in range(2, ws.max_column + 1):
-            for rr in (headcount_header_row + 1, headcount_header_row):
+        for rr in (headcount_header_row + 1, headcount_header_row):
+            for c in range(2, ws.max_column + 1):
                 v = ws.cell(row=rr, column=c).value
                 if isinstance(v, (_dt.datetime, _dt.date)):
                     if v.month in months:
                         hc_month_col[v.month] = c
-                    break
+            if hc_month_col:
+                break
 
         if not hc_month_col:
             hc_month_col = month_col
 
         for m, col in hc_month_col.items():
             result["headcount"][m] = _num(ws, hc_row, col)
+
+        print(f"[_parse_debts] численность: {result['headcount']}")
+    else:
+        print("[_parse_debts] блок «Численность» не найден")
 
     return result
 
@@ -3294,6 +3314,10 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     if debts_path and os.path.exists(debts_path):
         debts_data = _parse_debts(debts_path, months)
 
+        print(f"[presentation_builder] debts_data['debts']: "
+              f"{list(debts_data['debts'].keys())}")
+        print(f"[presentation_builder] headcount: {debts_data['headcount']}")
+
         # ---- Слайд 14. Долги Антонияс, Матиса, Эспорта ----
         obj_14 = [
             ("AN14 Антониас 14",         "F4A6B8"),
@@ -3392,6 +3416,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
 
     # --------------------------------------------------------
     # 4. Специальные листы: Расходы УК (слайды 61–62)
+    #    + отдельные слайды UK Estate (57–60)
     # --------------------------------------------------------
     if "UK Estate" in units:
         uk = units["UK Estate"]
@@ -3435,8 +3460,65 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             months=months,
         )
 
-        # Переименовываем остальные листы UK Estate на 57 и т.д. по карте PPTX.
-        # В PPTX: EBITDA UK Estate = 57, Доля ФОТ = 58, ПланФакт = 59, Итог = 60.
+        # ----------------------------------------------------
+        # Слайды 57–60. Отдельные листы UK Estate.
+        # ----------------------------------------------------
+        uk_slides = config.UK_ESTATE_SLIDES
+
+        # ---- Слайд 57. EBITDA margin UK Estate ----
+        # У UK Estate нет выручки (в ОПиУ только расходы),
+        # поэтому EBITDA margin будет 0 по всем месяцам.
+        # Всё равно строим — чтобы слайд был.
+        _sheet_ebitda(
+            wb,
+            sheet_title=_sheet_name_with_slide(
+                uk_slides["ebitda"], "EBITDA_UK_Estate"),
+            chart_title="Операционная рентабельность (EBITDA margin) UK Estate",
+            subtitle="EBITDA margin UK Estate, %",
+            line_color=_COLOR_LINE_YEL,
+            data=uk,
+            months=months,
+        )
+
+        # ---- Слайд 58. Доля ФОТ в выручке UK Estate ----
+        _sheet_fot(
+            wb,
+            sheet_title=_sheet_name_with_slide(
+                uk_slides["fot"], "Доля_ФОТ_UK_Estate"),
+            chart_title="Доля ФОТ в выручке UK Estate",
+            subtitle="Анализ ОПиУ Доля ФОТ UK Estate",
+            line_color=_COLOR_LINE_RED,
+            data=uk,
+            months=months,
+        )
+
+        # ---- Слайд 59. План/Факт по ЧП UK Estate ----
+        plan_uk = _parse_bdr_plan(bdr_path, "UK Estate", months)
+        if any(abs(v) > 0.01 for v in plan_uk.values()) or \
+           any(abs(v) > 0.01 for v in uk["net"].values()):
+            _sheet_plan_fact(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    uk_slides["plan_fact"], "ПланФакт_UK_Estate"),
+                chart_title="Выполнение годового плана по ЧП UK Estate",
+                subtitle="План (БДиР) vs Факт (ОПиУ) — UK Estate",
+                data_plan=plan_uk,
+                data_fact=uk["net"],
+                months=months,
+            )
+
+        # ---- Слайд 60. Итог UK Estate (нарастающим итогом) ----
+        _sheet_cumulative_plan_fact(
+            wb,
+            sheet_title=_sheet_name_with_slide(
+                uk_slides["cumulative"], "Итог_UK_Estate"),
+            chart_title="Выполнение годового плана по валовой прибыли UK Estate",
+            data_plan=plan_uk,
+            data_fact=uk["net"],
+            months=months,
+            plan_label="ЧП UK Estate план (с НДС)",
+            fact_label="ЧП UK Estate факт (с НДС)",
+        )
 
     # --------------------------------------------------------
     # СОРТИРОВКА ЛИСТОВ ПО НОМЕРАМ СЛАЙДОВ ПРЕЗЕНТАЦИИ
