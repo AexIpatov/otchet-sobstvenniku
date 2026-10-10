@@ -1775,6 +1775,30 @@ def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
 # ------------------------------------------------------------
 # Лист: «Возмещение коммунальных услуг» (слайды 25, 27, 29)
 # ------------------------------------------------------------
+def _find_ku_sheet(wb_ku, month_name):
+    """
+    Ищет в книге лист, на котором есть таблица возмещения КУ.
+    Признак: в столбце A есть ячейка «Объекты», а ниже — «AC89 Чака».
+
+    Сначала пробует лист с именем month_name (например, «Сентябрь»).
+    Если его нет — перебирает все листы.
+    """
+    # 1) Пробуем по имени
+    if month_name in wb_ku.sheetnames:
+        ws = wb_ku[month_name]
+        for r in range(1, 15):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "объекты" in v.lower():
+                return ws
+    # 2) Перебираем все листы
+    for ws in wb_ku.worksheets:
+        for r in range(1, 15):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "объекты" in v.lower():
+                return ws
+    # 3) Fallback — активный лист
+    return wb_ku.active
+
 def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
                                   ku_path, month_name, subtract_object=None):
     """
@@ -1839,7 +1863,7 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
         return ws
 
     wb_ku = openpyxl.load_workbook(ku_path, data_only=True)
-    ws_ku = wb_ku[month_name] if month_name in wb_ku.sheetnames else wb_ku.active
+    ws_ku = _find_ku_sheet(wb_ku, month_name)
 
     # Ищем строку с заголовком «Объекты» — обычно это строка 5
     data_start_row = None
@@ -1868,6 +1892,7 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
 
     # --- Режим «Итого минус объект» (для слайда 27) ---
     if subtract_object:
+        # Ищем первое «Итого» — это конец таблицы возмещения КУ
         total_row_src = None
         for r in range(data_start_row, ws_ku.max_row + 1):
             obj_name = _clean(ws_ku.cell(row=r, column=1).value)
@@ -1875,12 +1900,14 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
                 total_row_src = r
                 break
 
+        # Ищем строку с вычитаемым объектом ТОЛЬКО до первого «Итого»
         sub_row_src = None
-        for r in range(data_start_row, ws_ku.max_row + 1):
-            obj_name = _clean(ws_ku.cell(row=r, column=1).value)
-            if obj_name and subtract_object.lower() in obj_name.lower():
-                sub_row_src = r
-                break
+        if total_row_src is not None:
+            for r in range(data_start_row, total_row_src):
+                obj_name = _clean(ws_ku.cell(row=r, column=1).value)
+                if obj_name and subtract_object.lower() in obj_name.lower():
+                    sub_row_src = r
+                    break
 
         if total_row_src is None or sub_row_src is None:
             print(f"[presentation_builder] не найдены строки для вычитания "
@@ -1909,15 +1936,19 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
         return ws
 
     # --- Обычный режим: перебираем все объекты ---
+    # ВАЖНО: в файлах «ОДДС … с НДС.xlsx» / «… без НДС.xlsx»
+    # таблица возмещения КУ идёт первой и заканчивается строкой «Итого».
+    # Ниже начинается уже другой блок (Списания, Сальдо, Чистый денежный поток).
+    # Поэтому как только встретили ПЕРВОЕ «Итого» — останавливаемся.
     row_out = header_row + 1
     data_rows = []
     for r in range(data_start_row, ws_ku.max_row + 1):
         obj_name = _clean(ws_ku.cell(row=r, column=1).value)
         if not obj_name:
             continue
-        # Пропускаем строку «Итого» — её добавим в конце
+        # Первое «Итого» — конец таблицы возмещения КУ
         if "итого" in obj_name.lower():
-            continue
+            break
         # Пропускаем служебные строки
         if obj_name.startswith("*") or obj_name.startswith("-"):
             continue
@@ -3123,6 +3154,16 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
 
     print(f"[presentation_builder] Файл КУ с НДС:    {ku_with_vat}")
     print(f"[presentation_builder] Файл КУ без НДС:  {ku_without_vat}")
+
+    # Ищем два файла ОДДС в папке TEMP_KU_DIR:
+    #   - «... с НДС.xlsx»    → слайд 25
+    #   - «... без НДС.xlsx»  → слайд 29
+    # Слайд 27 строится из файла «с НДС» с вычитанием строки «AC89 Чака».
+    ku_with_vat    = config.find_ku_file_with_vat()
+    ku_without_vat = config.find_ku_file_without_vat()
+
+    print(f"[presentation_builder] Файл КУ с НДС:   {ku_with_vat}")
+    print(f"[presentation_builder] Файл КУ без НДС: {ku_without_vat}")
 
     ku_specs = [
         (25, "Возмещение_КУ_с_НДС",
