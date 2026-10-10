@@ -1401,9 +1401,13 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
                                 data_plan, data_fact, months,
                                 plan_label, fact_label):
     """
-    Лист «Нарастающим итогом» — две строки цветных прямоугольников.
-    Ширина прямоугольника пропорциональна значению месяца.
-    Справа — итог плана, итог факта и % выполнения.
+    Лист «Нарастающим итогом» — настоящая линейчатая диаграмма
+    с накоплениями (stacked horizontal bar chart).
+
+    Каждый месяц — отдельная серия (series) в stacked bar chart.
+    Две категории (по оси Y): «План» и «Факт».
+    Ширина каждой цветной полосы пропорциональна значению месяца.
+    Справа — блок итогов с суммой плана, суммой факта и % выполнения.
     """
     ws = wb.create_sheet(sheet_title)
 
@@ -1414,272 +1418,123 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     ws.cell(row=1, column=1).alignment = Alignment(
         horizontal="center", vertical="center")
     ws.merge_cells(start_row=1, start_column=1,
-                   end_row=1, end_column=_TOTAL_BAR_COLUMNS + 6)
+                   end_row=1, end_column=max(len(months) + 2, 12))
 
-    # ---- 2. Легенда сверху ----
-    legend_row = 3
-    col_legend = 2
-    for m in months:
-        c1 = ws.cell(row=legend_row, column=col_legend)
-        c1.fill = PatternFill("solid", fgColor=_MONTH_FILL.get(m, "808080"))
-        c1.border = _CELL_BORDER
-        ws.merge_cells(start_row=legend_row, start_column=col_legend,
-                       end_row=legend_row, end_column=col_legend + 1)
-        c2 = ws.cell(row=legend_row, column=col_legend + 2,
-                     value=_MONTHS_RU_LOWER.get(m, "").capitalize())
-        c2.font = Font(size=9, color="FFFFFF")
-        c2.fill = PatternFill("solid", fgColor="2E75B6")
-        c2.alignment = Alignment(horizontal="left", vertical="center")
-        col_legend += 3
+    # ---- 2. Данные для диаграммы ----
+    # Раскладка (строка 3 — шапка, строки 4-5 — категории):
+    #   A        | B      | C      | D      | ...
+    # 3 Показатель | Янв    | Фев    | Мар    | ...
+    # 4 План       | знач   | знач   | знач   | ...
+    # 5 Факт       | знач   | знач   | знач   | ...
+    #
+    # Каждый столбец B..N — серия (один месяц).
+    # Категории — строки 4 и 5 (План и Факт).
+    header_row = 3
+    plan_row   = 4
+    fact_row   = 5
 
-    # ---- 3. Считаем ширины прямоугольников ----
-    total_plan = sum(data_plan.get(m, 0.0) for m in months) or 1.0
-    total_fact = sum(data_fact.get(m, 0.0) for m in months) or 1.0
+    ws.cell(row=header_row, column=1, value="Показатель").font = Font(bold=True)
+    for i, m in enumerate(months, start=2):
+        ws.cell(row=header_row, column=i,
+                value=_MONTHS_RU_LOWER[m].capitalize()).font = Font(bold=True)
 
-    plan_cols = {}
-    fact_cols = {}
-    # Считаем «сырые» ширины и нормализуем так, чтобы их сумма
-    # была ровно _TOTAL_BAR_COLUMNS. Это гарантирует, что все полосы
-    # уместятся в отведенный диапазон и не залезут на колонку итогов.
-    raw_plan = {m: max(0.0, data_plan.get(m, 0.0) or 0.0) for m in months}
-    raw_fact = {m: max(0.0, data_fact.get(m, 0.0) or 0.0) for m in months}
-    sum_raw_plan = sum(raw_plan.values()) or 1.0
-    sum_raw_fact = sum(raw_fact.values()) or 1.0
+    ws.cell(row=plan_row, column=1, value=plan_label).font = Font(bold=True)
+    ws.cell(row=fact_row, column=1, value=fact_label).font = Font(bold=True)
 
-    def _normalize_widths(raw, total, total_cols, min_width=2):
-        widths = {}
-        for m in months:
-            w = max(min_width, round(raw[m] / total * total_cols))
-            widths[m] = w
-        # Корректируем, чтобы сумма точно равнялась total_cols
-        diff = sum(widths.values()) - total_cols
-        # Уменьшаем/увеличиваем начиная с самых широких полос
-        while diff != 0:
-            sorted_months = sorted(months, key=lambda mm: widths[mm], reverse=(diff > 0))
-            for m in sorted_months:
-                if diff == 0:
-                    break
-                if diff > 0 and widths[m] > min_width:
-                    widths[m] -= 1
-                    diff -= 1
-                elif diff < 0:
-                    widths[m] += 1
-                    diff += 1
-        return widths
+    for i, m in enumerate(months, start=2):
+        pc = ws.cell(row=plan_row, column=i,
+                     value=float(data_plan.get(m, 0.0) or 0.0))
+        pc.number_format = '#,##0'
+        fc = ws.cell(row=fact_row, column=i,
+                     value=float(data_fact.get(m, 0.0) or 0.0))
+        fc.number_format = '#,##0'
 
-    plan_cols = _normalize_widths(raw_plan, sum_raw_plan, _TOTAL_BAR_COLUMNS)
-    fact_cols = _normalize_widths(raw_fact, sum_raw_fact, _TOTAL_BAR_COLUMNS)
+    # ---- 3. Горизонтальная линейчатая диаграмма с накоплениями ----
+    chart = BarChart()
+    chart.type = "bar"           # горизонтальные полосы
+    chart.grouping = "stacked"   # накопление
+    chart.overlap = 100          # полосы вплотную
 
-    # ---- 4. Строка «План» ----
-    plan_row = 5
-    ws.row_dimensions[plan_row].height = 25 # Увеличиваем высоту строки
-    ws.cell(row=plan_row, column=1, value=plan_label).font = Font(
-        size=11, color="FFFFFF")
-    ws.cell(row=plan_row, column=1).alignment = Alignment(
-        horizontal="left", vertical="center")
+    # Данные: колонки = серии (месяцы), строки = категории (План, Факт)
+    data_ref = Reference(
+        ws,
+        min_col=2, max_col=1 + len(months),
+        min_row=header_row, max_row=fact_row,
+    )
+    cats_ref = Reference(
+        ws,
+        min_col=1,
+        min_row=plan_row, max_row=fact_row,
+    )
 
-    col = 2
-    for m in months:
-        width = plan_cols[m]
-        for c in range(col, col + width):
-            cell = ws.cell(row=plan_row, column=c)
-            cell.fill = PatternFill(
-                "solid", fgColor=_MONTH_FILL.get(m, "808080"))
-            # Убираем границы, чтобы не было вертикальных разделителей
-            cell.border = Border()
-        mid = col + width // 2
-        # Объединяем несколько ячеек для размещения числа
-        start_merge_col = max(col, mid - 1)
-        end_merge_col = min(col + width - 1, mid + 1)
-        if start_merge_col < end_merge_col:
-            ws.merge_cells(start_row=plan_row, start_column=start_merge_col,
-                           end_row=plan_row, end_column=end_merge_col)
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats_ref)
 
-        vcell = ws.cell(row=plan_row, column=start_merge_col,
-                        value=round(data_plan.get(m, 0.0), 0))
-        vcell.font = Font(bold=True, size=10, color="FFFFFF")
-        vcell.alignment = Alignment(horizontal="center", vertical="center")
-        vcell.number_format = '#,##0'
-        col += width
+    # Цвета серий — каждый месяц своим цветом
+    for idx, series in enumerate(chart.series):
+        if idx < len(months):
+            m = months[idx]
+            color = _MONTH_FILL.get(m, "808080")
+            series.graphicalProperties.solidFill = color
+            series.graphicalProperties.line.solidFill = color
 
-    # ---- 5. Строка «Факт» ----
-    fact_row = plan_row + 1
-    ws.row_dimensions[fact_row].height = 25 # Увеличиваем высоту строки
-    ws.cell(row=fact_row, column=1, value=fact_label).font = Font(
-        size=11, color="FFFFFF")
-    ws.cell(row=fact_row, column=1).alignment = Alignment(
-        horizontal="left", vertical="center")
+    chart.title = chart_title
+    chart.width = 30    # см
+    chart.height = 10   # см
 
-    col = 2
-    for m in months:
-        width = fact_cols[m]
-        for c in range(col, col + width):
-            cell = ws.cell(row=fact_row, column=c)
-            cell.fill = PatternFill(
-                "solid", fgColor=_MONTH_FILL.get(m, "808080"))
-            # Убираем границы, чтобы не было вертикальных разделителей
-            cell.border = Border()
-        mid = col + width // 2
-        # Объединяем несколько ячеек для размещения числа
-        start_merge_col = max(col, mid - 1)
-        end_merge_col = min(col + width - 1, mid + 1)
-        if start_merge_col < end_merge_col:
-            ws.merge_cells(start_row=fact_row, start_column=start_merge_col,
-                           end_row=fact_row, end_column=end_merge_col)
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
 
-        vcell = ws.cell(row=fact_row, column=start_merge_col,
-                        value=round(data_fact.get(m, 0.0), 0))
-        vcell.font = Font(bold=True, size=10, color="FFFFFF")
-        vcell.alignment = Alignment(horizontal="center", vertical="center")
-        vcell.number_format = '#,##0'
-        col += width
+    # Числовые подписи — внутри полос
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "ctr"
 
-    # ---- 6. Итоги справа ----
-    # Отступаем достаточно далеко от полос, чтобы гарантированно
-    # не пересечься с объединенными ячейками строк «План» и «Факт».
-    sum_col = 2 + _TOTAL_BAR_COLUMNS + 10
+    # Легенда — сверху (месяцы)
+    chart.legend.position = "t"
+    chart.legend.overlay = False
 
-    sum_plan = sum(data_plan.get(m, 0.0) for m in months)
-    sum_fact = sum(data_fact.get(m, 0.0) for m in months)
+    ws.add_chart(chart, "A7")
+
+    # ---- 4. Блок итогов справа от диаграммы ----
+    # Сумма плана, сумма факта и % выполнения.
+    sum_plan = sum(float(data_plan.get(m, 0.0) or 0.0) for m in months)
+    sum_fact = sum(float(data_fact.get(m, 0.0) or 0.0) for m in months)
     pct = (sum_fact / sum_plan) if sum_plan else 0.0
 
-    for r in range(plan_row, fact_row + 2):
-        c = ws.cell(row=r, column=sum_col)
-        c.fill = PatternFill("solid", fgColor="1F3864")
-        c.border = _CELL_BORDER
+    # Правый блок — начиная со столбца, идущего после месяцев
+    box_col = max(12, len(months) + 4)
 
-    v = ws.cell(row=plan_row, column=sum_col, value=round(sum_plan, 0))
-    v.font = Font(bold=True, size=12, color="FFC000")
-    v.alignment = Alignment(horizontal="center", vertical="center")
-    v.number_format = '#,##0'
+    box_row = 3
+    box_items = [
+        ("План", round(sum_plan, 0), '#,##0', "FFC000"),
+        ("Факт", round(sum_fact, 0), '#,##0', "FFC000"),
+        ("%",    round(pct, 4),      '0.0%',  "FFFFFF"),
+    ]
 
-    v = ws.cell(row=fact_row, column=sum_col, value=round(sum_fact, 0))
-    v.font = Font(bold=True, size=12, color="FFC000")
-    v.alignment = Alignment(horizontal="center", vertical="center")
-    v.number_format = '#,##0'
+    for i, (label, value, num_fmt, color) in enumerate(box_items):
+        r = box_row + i
+        c_lab = ws.cell(row=r, column=box_col, value=label)
+        c_val = ws.cell(row=r, column=box_col + 1, value=value)
 
-    v = ws.cell(row=fact_row + 1, column=sum_col, value=round(pct, 4))
-    v.font = Font(bold=True, size=11, color="FFFFFF")
-    v.alignment = Alignment(horizontal="center", vertical="center")
-    v.number_format = '0.0%'
-
-    # ---- 7. Ось «Периоды» внизу ----
-    axis_row = fact_row + 3
-    ws.cell(row=axis_row, column=1, value="Периоды").font = Font(
-        size=10, color="FFFFFF")
-
-    max_val = max(sum_plan, sum_fact, 200000)
-    steps = 4
-    for i in range(steps + 1):
-        value = int(max_val * i / steps)
-        col_a = 2 + round(i / steps * (_TOTAL_BAR_COLUMNS - 1))
-        c = ws.cell(row=axis_row, column=col_a, value=value)
-        c.font = Font(size=9, color="FFFFFF")
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        c.number_format = '#,##0'
-
-    # ---- 8. Ширина столбцов ----
-    ws.column_dimensions["A"].width = 30
-    for c in range(2, 2 + _TOTAL_BAR_COLUMNS):
-        col_letter = get_column_letter(c)
-        # Увеличиваем ширину столбцов
-        ws.column_dimensions[col_letter].width = 2.5
-    # Ширина для колонки с итогами
-    sum_col_letter = get_column_letter(sum_col)
-    ws.column_dimensions[sum_col_letter].width = 14
-
-    # ---- 8b. ТАБЛИЦА С НАКОПЛЕННЫМИ ИТОГАМИ ----
-    # Под осью «Периоды» размещаем таблицу с итогами
-    # нарастающим итогом: месяц, план (накопл.), факт (накопл.), %.
-    table_row = axis_row + 3
-
-    # Заголовок таблицы
-    table_headers = ["Месяц", "План (накопл.)", "Факт (накопл.)", "% выполнения"]
-    for c, h in enumerate(table_headers, start=1):
-        cell = ws.cell(row=table_row, column=c, value=h)
-        cell.font = Font(bold=True, size=11, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="2E75B6")
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = _CELL_BORDER
-
-    # Накопительные итоги по месяцам
-    cum_plan = 0.0
-    cum_fact = 0.0
-    for i, m in enumerate(months):
-        cum_plan += data_plan.get(m, 0.0)
-        cum_fact += data_fact.get(m, 0.0)
-        pct_m = (cum_fact / cum_plan) if cum_plan else 0.0
-
-        r = table_row + 1 + i
-        row_vals = [
-            _MONTHS_RU_LOWER[m].capitalize(),
-            round(cum_plan, 0),
-            round(cum_fact, 0),
-            round(pct_m, 4),
-        ]
-        for c, v in enumerate(row_vals, start=1):
-            cell = ws.cell(row=r, column=c, value=v)
-            cell.font = Font(size=10, color="FFFFFF")
+        for cell in (c_lab, c_val):
             cell.fill = PatternFill("solid", fgColor="1F3864")
+            cell.font = Font(bold=True, color=color, size=11)
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = _CELL_BORDER
-            if c in (2, 3):
-                cell.number_format = '#,##0'
-            elif c == 4:
-                cell.number_format = '0.0%'
 
-    # Итоговая строка «Итого»
-    total_row = table_row + 1 + len(months)
-    total_vals = [
-        "Итого",
-        round(sum_plan, 0),
-        round(sum_fact, 0),
-        round(pct, 4),
-    ]
-    for c, v in enumerate(total_vals, start=1):
-        cell = ws.cell(row=total_row, column=c, value=v)
-        cell.font = Font(bold=True, size=11, color="FFC000")
-        cell.fill = PatternFill("solid", fgColor="2E75B6")
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = _CELL_BORDER
-        if c in (2, 3):
-            cell.number_format = '#,##0'
-        elif c == 4:
-            cell.number_format = '0.0%'
+        c_val.number_format = num_fmt
 
-    # Ширина столбцов таблицы
-    ws.column_dimensions["A"].width = 30
-    ws.column_dimensions[get_column_letter(2)].width = 18
-    ws.column_dimensions[get_column_letter(3)].width = 18
-    ws.column_dimensions[get_column_letter(4)].width = 16
+    # Ширина колонок
+    ws.column_dimensions["A"].width = 25
+    for i in range(2, 2 + len(months)):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    ws.column_dimensions[get_column_letter(box_col)].width = 10
+    ws.column_dimensions[get_column_letter(box_col + 1)].width = 14
 
-    # ---- 9. Тёмно-синий фон ----
-    bg = PatternFill("solid", fgColor="1F3864")
-    # Фон для всего листа — до последней строки таблицы
-    for r in range(1, total_row + 1):
-        for c in range(1, sum_col + 2):
-            cell = ws.cell(row=r, column=c)
-            # Пропускаем MergedCell — у них нельзя менять ни value, ни fill
-            if type(cell).__name__ == "MergedCell":
-                continue
-            if cell.value is None:
-                cell.fill = bg
-
-    # Скрываем сетку Excel
-    ws.sheet_view.showGridLines = False
-    return ws
-
-    # ---- 9. Тёмно-синий фон ----
-    bg = PatternFill("solid", fgColor="1F3864")
-    for r in range(1, axis_row + 2):
-        for c in range(1, sum_col + 2):
-            cell = ws.cell(row=r, column=c)
-            # Пропускаем MergedCell — у них нельзя менять ни value, ни fill
-            if type(cell).__name__ == "MergedCell":
-                continue
-            if cell.value is None:
-                cell.fill = bg
-
-    # Скрываем сетку Excel
     ws.sheet_view.showGridLines = False
     return ws
