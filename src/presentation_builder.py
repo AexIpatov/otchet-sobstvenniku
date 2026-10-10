@@ -363,19 +363,12 @@ def _collect_units(rows, months):
 
     # 4) агрегаты юнита
     for u_name, u in units.items():
-        # Для Unelma и Nomiqa "Чистая прибыль" юнита = сумма по объектам
-        # Для остальных юнитов берем строку "Чистая прибыль" из секции юнита
-        if u_name in ("Unelma", "Nomiqa"):
-            for m in months:
-                # Для этих юнитов _find_row находит "Чистую прибыль" на уровне юнита
-                # которая уже может быть агрегатом, но для надежности суммируем по объектам
-                unit_net = sum(o["net"][m] for o in u["objects"].values())
-                if unit_net != 0: # Если сумма по объектам не ноль, используем ее
-                    u["net"][m] = unit_net
-                # Если сумма по объектам ноль, оставляем значение, найденное _find_row
-
-        # Выручка и ФОТ всегда сумма по объектам
+        # «Чистая прибыль» юнита = сумма по его объектам.
+        # Это работает для всех юнитов: для Unelma/Nomiqa
+        # (у которых один объект), для Latvia/East-Восток/Europe
+        # (у которых много объектов), для UK Estate (объектов нет — 0).
         for m in months:
+            u["net"][m]     = sum(o["net"][m]     for o in u["objects"].values())
             u["revenue"][m] = sum(o["revenue"][m] for o in u["objects"].values())
             u["fot"][m]     = sum(o["fot"][m]     for o in u["objects"].values())
 
