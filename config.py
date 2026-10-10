@@ -43,10 +43,11 @@ TEMP_OPIU_DIR         = TEMP_DIR / "ОПиУ"
 TEMP_FORECAST_DIR     = TEMP_DIR / "Прогнозы"
 TEMP_VAT_DIR          = TEMP_DIR / "НДС"
 TEMP_PRESENTATION_DIR = TEMP_DIR / "Презентация"
+TEMP_KU_DIR           = TEMP_DIR / "Возмещение КУ"
 
 # Создаём папки (если их нет)
 for _d in (OUTPUT_DIR, TEMP_DIR, TEMP_OPIU_DIR, TEMP_FORECAST_DIR,
-           TEMP_VAT_DIR, TEMP_PRESENTATION_DIR):
+           TEMP_VAT_DIR, TEMP_PRESENTATION_DIR, TEMP_KU_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -900,3 +901,15 @@ TEMPLATE_ROW_MAP = {
         ],
     },
 }
+
+# ============================================================
+# 16. ФАЙЛЫ ВОЗМЕЩЕНИЯ КОММУНАЛЬНЫХ УСЛУГ (КУ)
+# ============================================================
+# Используются для слайдов 25, 27, 29 презентации.
+# Пользователь загружает эти файлы через app.py.
+# Имена файлов должны точно совпадать с теми, что ожидает
+# presentation_builder.py.
+KU_FILE_WITH_VAT_ALL        = TEMP_KU_DIR / "Возмещение КУ с НДС.xlsx"
+KU_FILE_WITH_VAT_NO_CHAKA   = TEMP_KU_DIR / "Возмещение КУ с НДС кроме Чака 89.xlsx"
+KU_FILE_WITHOUT_VAT_ALL     = TEMP_KU_DIR / "Возмещение КУ без НДС по всем.xlsx"
+

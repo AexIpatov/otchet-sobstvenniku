@@ -534,6 +534,22 @@ with st.expander("📙 Прогнозы месячные", expanded=True):
         key="upload_forecast",
     )
 
+with st.expander("📗 Возмещение коммунальных услуг (для презентации)", expanded=True):
+    st.caption(
+        "Загрузите три файла «Возмещение КУ...» — они используются для "
+        "слайдов 25, 27, 29 презентации (таблицы). Имена файлов должны "
+        "быть такими:\n"
+        "- `Возмещение КУ с НДС.xlsx`\n"
+        "- `Возмещение КУ с НДС кроме Чака 89.xlsx`\n"
+        "- `Возмещение КУ без НДС по всем.xlsx`"
+    )
+    ku_files = st.file_uploader(
+        "Выберите файлы Возмещения КУ (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="upload_ku",
+    )
+
 with st.expander("📕 НДС (файлы «НДС ММ.ГГГГ <Статья>.xlsx»)", expanded=True):
     st.caption(
         "Загрузите файлы НДС **за прошлый месяц** (для колонки C) "
@@ -580,10 +596,11 @@ n_invest = _save_uploaded(
     config.REF_DIR,
 )
 n_forecast = _save_uploaded(forecast_files, config.TEMP_FORECAST_DIR)
+n_ku = _save_uploaded(ku_files, config.TEMP_KU_DIR)
 n_vat = _save_uploaded(vat_files, config.TEMP_VAT_DIR)
 
 total_uploaded = (n_opiu + n_opiu_full + n_bdr + n_bdr_full +
-                  n_odds + n_invest + n_forecast + n_vat)
+                  n_odds + n_invest + n_forecast + n_ku + n_vat)
 
 if total_uploaded > 0:
     st.success(
@@ -593,7 +610,8 @@ if total_uploaded > 0:
         f"БДиР (единый) — {n_bdr_full}, "
         f"ОДДС — {n_odds}, "
         f"Вложений — {n_invest}, "
-        f"Прогнозов — {n_forecast}, НДС — {n_vat}."
+        f"Прогнозов — {n_forecast}, "
+        f"Возмещение КУ — {n_ku}, НДС — {n_vat}."
     )
 
 

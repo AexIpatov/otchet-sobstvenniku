@@ -1772,6 +1772,184 @@ def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
         col_letter = ws.cell(row=header_row, column=c).column_letter
         ws.column_dimensions[col_letter].width = 12
 
+# ------------------------------------------------------------
+# Лист: «Возмещение коммунальных услуг» (слайды 25, 27, 29)
+# ------------------------------------------------------------
+def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
+                                  ku_path, month_name):
+    """
+    Создаёт лист с таблицей возмещения коммунальных услуг.
+
+    ku_path — путь к файлу «Возмещение КУ...xlsx» (лист «Сентябрь» или
+              соответствующий month_name).
+    month_name — название месяца (например, «Сентябрь»).
+
+    Столбцы:
+      A — Объекты
+      B — (пусто)
+      C — (пусто)  ← по требованию
+      D — (пусто)  ← по требованию
+      E — 1.2.10.1 Мусор
+      F — 1.2.10.2 Газ
+      G — 1.2.10.3 Вода
+      H — 1.2.10.4 Отопление
+      I — 1.2.10.5 Электричество
+      J — 1.2.10.6 Коммунальные УК дома
+      K — Всего расходов на коммунальные услуги
+      L — Разница между выставленными счетами и фактическими
+          коммунальными расходами за отчётный месяц (гр. 3 – гр. 11)
+      M — 1.1.2.3 Компенсация по коммунальным расходам — Поступившая
+      N — Задолженность по возмещению КУ за отчётный месяц
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    # --- Заголовки таблицы ---
+    header_row = 5
+    headers = [
+        "Объекты",
+        "",  # столбец B — пусто
+        "",  # столбец C — пусто
+        "",  # столбец D — пусто
+        "1.2.10.1 Мусор",
+        "1.2.10.2 Газ",
+        "1.2.10.3 Вода",
+        "1.2.10.4 Отопление",
+        "1.2.10.5 Электричество",
+        "1.2.10.6 Коммунальные УК дома",
+        "Всего расходов на коммунальные услуги",
+        "Разница между выставленными счетами и фактическими коммунальными расходами за отчётный месяц",
+        "1.1.2.3 Компенсация по коммунальным расходам — Поступившая на счёт",
+        "Задолженность по возмещению КУ за отчётный месяц",
+    ]
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+
+    # --- Читаем данные из файла КУ ---
+    if not ku_path or not os.path.exists(ku_path):
+        print(f"[presentation_builder] не найден файл КУ: {ku_path}")
+        return ws
+
+    wb_ku = openpyxl.load_workbook(ku_path, data_only=True)
+    ws_ku = wb_ku[month_name] if month_name in wb_ku.sheetnames else wb_ku.active
+
+    # Ищем строку с заголовком «Объекты» — обычно это строка 5
+    data_start_row = None
+    for r in range(1, 10):
+        v = ws_ku.cell(row=r, column=1).value
+        if v and "объекты" in str(v).lower():
+            data_start_row = r + 1
+            break
+    if data_start_row is None:
+        data_start_row = 6
+
+    # Определяем столбцы в исходном файле
+    # A — объект
+    # C — Выставлено в [месяце] арендаторам (гр. 3)
+    # D — в т.ч. НДС
+    # E — 1.2.10.1 Мусор
+    # F — 1.2.10.2 Газ
+    # G — 1.2.10.3 Вода
+    # H — 1.2.10.4 Отопление
+    # I — 1.2.10.5 Электричество
+    # J — 1.2.10.6 Коммунальные УК дома
+    # K — Всего расходов
+    # L — Разница за отчётный месяц
+    # M — Компенсация поступившая
+    # N — Задолженность
+
+    # --- Заполняем строки ---
+    row_out = header_row + 1
+    data_rows = []
+    for r in range(data_start_row, ws_ku.max_row + 1):
+        obj_name = _clean(ws_ku.cell(row=r, column=1).value)
+        if not obj_name:
+            continue
+        # Пропускаем строку «Итого» — её добавим в конце
+        if "итого" in obj_name.lower():
+            continue
+        # Пропускаем служебные строки
+        if obj_name.startswith("*") or obj_name.startswith("-"):
+            continue
+
+        # Считываем значения из файла
+        val_musor   = _num(ws_ku, r, 5)   # E
+        val_gaz     = _num(ws_ku, r, 6)   # F
+        val_voda    = _num(ws_ku, r, 7)   # G
+        val_otopl   = _num(ws_ku, r, 8)   # H
+        val_elektr  = _num(ws_ku, r, 9)   # I
+        val_uk_doma = _num(ws_ku, r, 10)  # J
+        val_vsego   = _num(ws_ku, r, 11)  # K
+        val_komp    = _num(ws_ku, r, 13)  # M
+
+        # Записываем в выходной лист
+        ws.cell(row=row_out, column=1, value=obj_name).border = _CELL_BORDER
+        # B, C, D — пустые
+        ws.cell(row=row_out, column=2).border = _CELL_BORDER
+        ws.cell(row=row_out, column=3).border = _CELL_BORDER
+        ws.cell(row=row_out, column=4).border = _CELL_BORDER
+
+        ws.cell(row=row_out, column=5, value=round(val_musor, 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=6, value=round(val_gaz, 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=7, value=round(val_voda, 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=8, value=round(val_otopl, 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=9, value=round(val_elektr, 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=10, value=round(val_uk_doma, 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=11, value=round(val_vsego, 2)).border = _CELL_BORDER
+
+        # Столбец 12 — формула: =C{r}-K{r} (гр. 3 – гр. 11)
+        # Но C у нас пустой, поэтому используем значение из файла (L)
+        # Если вы хотите строго формулу, то нужно, чтобы C был заполнен.
+        # Поскольку C пустой, формула =C{r}-K{r} даст -K{r}.
+        # Поэтому временно используем значение из файла (L).
+        # В будущем, если C будет заполняться, можно заменить на формулу.
+        ws.cell(row=row_out, column=12,
+                value=round(_num(ws_ku, r, 12), 2)).border = _CELL_BORDER
+        # Столбец 12 — это L из файла.
+
+        # Столбец 13 — компенсация поступившая (M)
+        ws.cell(row=row_out, column=13, value=round(val_komp, 2)).border = _CELL_BORDER
+        # Столбец 14 — задолженность (N)
+        ws.cell(row=row_out, column=14,
+                value=round(_num(ws_ku, r, 14), 2)).border = _CELL_BORDER
+
+        data_rows.append(row_out)
+        row_out += 1
+
+    # --- Строка «Итого» ---
+    total_row = row_out
+    ws.cell(row=total_row, column=1, value="Итого").font = Font(bold=True)
+    ws.cell(row=total_row, column=1).border = _CELL_BORDER
+    for c in range(2, 15):
+        ws.cell(row=total_row, column=c).border = _CELL_BORDER
+
+    # Формулы для итогов
+    if data_rows:
+        first_data = data_rows[0]
+        last_data = data_rows[-1]
+        for c in range(5, 15):  # столбцы E..N
+            col_letter = get_column_letter(c)
+            formula = f"=SUM({col_letter}{first_data}:{col_letter}{last_data})"
+            cell = ws.cell(row=total_row, column=c, value=formula)
+            cell.font = Font(bold=True)
+            cell.number_format = '#,##0'
+            cell.border = _CELL_BORDER
+    else:
+        for c in range(5, 15):
+            ws.cell(row=total_row, column=c, value=0).border = _CELL_BORDER
+
+    # --- Ширина колонок ---
+    ws.column_dimensions["A"].width = 30
+    for c in range(2, 15):
+        ws.column_dimensions[get_column_letter(c)].width = 14
+
+    return ws
+
 def _collect_dds(odds_path, unit_name, months):
     """
     Читает строки-агрегаты «Поступления» и «Списания» юнита из ОДДС.
@@ -2881,6 +3059,42 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 rows_data=east_bal["rows"],
                 months=months,
             )
+
+    # --------------------------------------------------------
+    # 3b2. Возмещение коммунальных услуг (слайды 25, 27, 29)
+    # --------------------------------------------------------
+    # Слайд 25 — «Возмещение Коммунальных услуг с НДС» (таблица)
+    # Слайд 27 — «Возмещение Коммунальных услуг с НДС кроме Чака 89»
+    # Слайд 29 — «Возмещение Коммунальных услуг без НДС по всем»
+    month_name_ru = _MONTHS_RU_LOWER.get(month, "сентябрь").capitalize()
+
+    ku_specs = [
+        (25, "Возмещение_КУ_с_НДС",
+         "Возмещение Коммунальных услуг с НДС",
+         f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года с НДС, EUR",
+         config.KU_FILE_WITH_VAT_ALL),
+        (27, "Возмещение_КУ_с_НДС_кроме_Чака",
+         "Возмещение Коммунальных услуг с НДС кроме Чака 89",
+         f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года (с НДС кроме Чака 89), EUR",
+         config.KU_FILE_WITH_VAT_NO_CHAKA),
+        (29, "Возмещение_КУ_без_НДС",
+         "Возмещение Коммунальных услуг без НДС по всем",
+         f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года без НДС по всем, EUR",
+         config.KU_FILE_WITHOUT_VAT_ALL),
+    ]
+
+    for slide_no, base_name, chart_title, subtitle, ku_path in ku_specs:
+        if ku_path and os.path.exists(ku_path):
+            _sheet_utility_reimbursement(
+                wb,
+                sheet_title=_sheet_name_with_slide(slide_no, base_name),
+                chart_title=chart_title,
+                subtitle=subtitle,
+                ku_path=ku_path,
+                month_name=month_name_ru,
+            )
+        else:
+            print(f"[presentation_builder] не найден файл КУ для слайда {slide_no}: {ku_path}")
 
     # --------------------------------------------------------
     # 3c. Долги (слайды 14, 19, 24) и Численность (слайд 64)
