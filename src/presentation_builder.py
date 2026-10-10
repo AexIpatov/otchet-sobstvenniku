@@ -20,6 +20,7 @@ import openpyxl
 from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.chart.label import DataLabelList
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 import config
 
@@ -1561,11 +1562,12 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     # ---- 8. Ширина столбцов ----
     ws.column_dimensions["A"].width = 30
     for c in range(2, 2 + _TOTAL_BAR_COLUMNS):
-        col_letter = ws.cell(row=plan_row, column=c).column_letter
+        col_letter = get_column_letter(c)
         # Увеличиваем ширину столбцов
         ws.column_dimensions[col_letter].width = 2.5
-    ws.column_dimensions[
-        ws.cell(row=plan_row, column=sum_col).column_letter].width = 14
+    # Ширина для колонки с итогами
+    sum_col_letter = get_column_letter(sum_col)
+    ws.column_dimensions[sum_col_letter].width = 14
 
     # ---- 9. Тёмно-синий фон ----
     bg = PatternFill("solid", fgColor="1F3864")
