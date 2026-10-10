@@ -360,11 +360,22 @@ def _collect_units(rows, months):
                     fot_prod.get(m, 0.0) + fot_comm.get(m, 0.0)
                 )
 
-    # 4) агрегаты юнита = сумма по объектам
+    # 4) агрегаты юнита
     for u_name, u in units.items():
+        # Для Unelma и Nomiqa "Чистая прибыль" юнита = сумма по объектам
+        # Для остальных юнитов берем строку "Чистая прибыль" из секции юнита
+        if u_name in ("Unelma", "Nomiqa"):
+            for m in months:
+                # Для этих юнитов _find_row находит "Чистую прибыль" на уровне юнита
+                # которая уже может быть агрегатом, но для надежности суммируем по объектам
+                unit_net = sum(o["net"][m] for o in u["objects"].values())
+                if unit_net != 0: # Если сумма по объектам не ноль, используем ее
+                    u["net"][m] = unit_net
+                # Если сумма по объектам ноль, оставляем значение, найденное _find_row
+
+        # Выручка и ФОТ всегда сумма по объектам
         for m in months:
             u["revenue"][m] = sum(o["revenue"][m] for o in u["objects"].values())
-            u["net"][m]     = sum(o["net"][m]     for o in u["objects"].values())
             u["fot"][m]     = sum(o["fot"][m]     for o in u["objects"].values())
 
     # 5) виртуальный юнит «Коммерческие»
@@ -987,8 +998,8 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         "Latvia":       (_UNIT_SLIDE_START["Latvia"],     5,  7),
         "East-Восток":  (_UNIT_SLIDE_START["East-Восток"], 42, 40),
         "Europe":       (_UNIT_SLIDE_START["Europe"],     51, 52),
-        "Nomiqa":       (_UNIT_SLIDE_START["Nomiqa"],     73, 74),
-        "Unelma":       (_UNIT_SLIDE_START["Unelma"],     68, 69),
+        "Nomiqa":       (_UNIT_SLIDE_START["Nomiqa"],     73, 0),  # ← Доля ФОТ = 0 (нет отдельного слайда)
+        "Unelma":       (_UNIT_SLIDE_START["Unelma"],     68, 0),  # ← Доля ФОТ = 0 (нет отдельного слайда)
         "UK Estate":    (_UNIT_SLIDE_START["UK Estate"],  57, 58),
     }
 
@@ -1012,17 +1023,19 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             ebitda_color = _COLOR_LINE_YEL
             fot_color    = _COLOR_LINE_RED
 
-        # ОПиУ юнита
-        _sheet_revenue_profit(
-            wb,
-            sheet_title=_sheet_name_with_slide(sl_opiu, f"ОПиУ_{unit_name}"),
-            chart_title=f"Выручка & Чистая прибыль {unit_name}, без НДС",
-            subtitle=f"ОПиУ {unit_name}",
-            color_rev=_COLOR_REVENUE,
-            color_net=_COLOR_NET,
-            data=u,
-            months=months,
-        )
+        # ОПиУ юнита (кроме UK Estate — для него ОПиУ Расходы УК
+        # создается отдельно в конце, на слайде 56)
+        if unit_name != "UK Estate":
+            _sheet_revenue_profit(
+                wb,
+                sheet_title=_sheet_name_with_slide(sl_opiu, f"ОПиУ_{unit_name}"),
+                chart_title=f"Выручка & Чистая прибыль {unit_name}, без НДС",
+                subtitle=f"ОПиУ {unit_name}",
+                color_rev=_COLOR_REVENUE,
+                color_net=_COLOR_NET,
+                data=u,
+                months=months,
+            )
 
         # EBITDA юнита
         if sl_ebitda:
@@ -1076,7 +1089,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 sl_cumulative = {
                     "Latvia":      9,
                     "East-Восток": 43,
-                    "Europe":      52,
+                    "Europe":      0,   # ← Нет отдельного слайда с Итогом
                     "Nomiqa":      74,
                     "Unelma":      69,
                     "UK Estate":   60,
@@ -1179,11 +1192,14 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 )
 
                             # Нарастающий итог для объекта
+                # Для Эспорты нет отдельного слайда с итогом —
+                # на слайде 30 уже есть ПланФакт, поэтому ставим 0,
+                # чтобы лист «Итог» не создавался.
                 sl_cumulative_obj = {
                     "Антонияс": 13,
                     "Чака":     18,
                     "Матиса":   35,
-                    "Эспорта":  30,
+                    "Эспорта":  0,
                 }.get(obj_short)
 
                 if sl_cumulative_obj:
@@ -1384,7 +1400,7 @@ _MONTH_FILL = {
     12: "203864",
 }
 
-_TOTAL_BAR_COLUMNS = 100   # сколько узких столбцов используем для полос
+_TOTAL_BAR_COLUMNS = 50   # сколько узких столбцов используем для полос
 
 
 def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
@@ -1431,11 +1447,14 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     for m in months:
         p = data_plan.get(m, 0.0) or 0.0
         f = data_fact.get(m, 0.0) or 0.0
-        plan_cols[m] = max(3, round(p / total_plan * _TOTAL_BAR_COLUMNS))
-        fact_cols[m] = max(3, round(f / total_fact * _TOTAL_BAR_COLUMNS))
+        # Уменьшаем общее количество столбцов для лучшей читаемости
+        # _TOTAL_BAR_COLUMNS = 50
+        plan_cols[m] = max(2, round(p / total_plan * _TOTAL_BAR_COLUMNS))
+        fact_cols[m] = max(2, round(f / total_fact * _TOTAL_BAR_COLUMNS))
 
     # ---- 4. Строка «План» ----
     plan_row = 5
+    ws.row_dimensions[plan_row].height = 25 # Увеличиваем высоту строки
     ws.cell(row=plan_row, column=1, value=plan_label).font = Font(
         size=11, color="FFFFFF")
     ws.cell(row=plan_row, column=1).alignment = Alignment(
@@ -1448,8 +1467,17 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
             cell = ws.cell(row=plan_row, column=c)
             cell.fill = PatternFill(
                 "solid", fgColor=_MONTH_FILL.get(m, "808080"))
+            # Убираем границы, чтобы не было вертикальных разделителей
+            cell.border = Border()
         mid = col + width // 2
-        vcell = ws.cell(row=plan_row, column=mid,
+        # Объединяем несколько ячеек для размещения числа
+        start_merge_col = max(col, mid - 1)
+        end_merge_col = min(col + width - 1, mid + 1)
+        if start_merge_col < end_merge_col:
+            ws.merge_cells(start_row=plan_row, start_column=start_merge_col,
+                           end_row=plan_row, end_column=end_merge_col)
+
+        vcell = ws.cell(row=plan_row, column=start_merge_col,
                         value=round(data_plan.get(m, 0.0), 0))
         vcell.font = Font(bold=True, size=10, color="FFFFFF")
         vcell.alignment = Alignment(horizontal="center", vertical="center")
@@ -1458,6 +1486,7 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
 
     # ---- 5. Строка «Факт» ----
     fact_row = plan_row + 1
+    ws.row_dimensions[fact_row].height = 25 # Увеличиваем высоту строки
     ws.cell(row=fact_row, column=1, value=fact_label).font = Font(
         size=11, color="FFFFFF")
     ws.cell(row=fact_row, column=1).alignment = Alignment(
@@ -1470,8 +1499,17 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
             cell = ws.cell(row=fact_row, column=c)
             cell.fill = PatternFill(
                 "solid", fgColor=_MONTH_FILL.get(m, "808080"))
+            # Убираем границы, чтобы не было вертикальных разделителей
+            cell.border = Border()
         mid = col + width // 2
-        vcell = ws.cell(row=fact_row, column=mid,
+        # Объединяем несколько ячеек для размещения числа
+        start_merge_col = max(col, mid - 1)
+        end_merge_col = min(col + width - 1, mid + 1)
+        if start_merge_col < end_merge_col:
+            ws.merge_cells(start_row=fact_row, start_column=start_merge_col,
+                           end_row=fact_row, end_column=end_merge_col)
+
+        vcell = ws.cell(row=fact_row, column=start_merge_col,
                         value=round(data_fact.get(m, 0.0), 0))
         vcell.font = Font(bold=True, size=10, color="FFFFFF")
         vcell.alignment = Alignment(horizontal="center", vertical="center")
@@ -1524,7 +1562,8 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     ws.column_dimensions["A"].width = 30
     for c in range(2, 2 + _TOTAL_BAR_COLUMNS):
         col_letter = ws.cell(row=plan_row, column=c).column_letter
-        ws.column_dimensions[col_letter].width = 1.0
+        # Увеличиваем ширину столбцов
+        ws.column_dimensions[col_letter].width = 2.5
     ws.column_dimensions[
         ws.cell(row=plan_row, column=sum_col).column_letter].width = 14
 
