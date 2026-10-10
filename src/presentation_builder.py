@@ -1588,6 +1588,87 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     sum_col_letter = get_column_letter(sum_col)
     ws.column_dimensions[sum_col_letter].width = 14
 
+    # ---- 8b. ТАБЛИЦА С НАКОПЛЕННЫМИ ИТОГАМИ ----
+    # Под осью «Периоды» размещаем таблицу с итогами
+    # нарастающим итогом: месяц, план (накопл.), факт (накопл.), %.
+    table_row = axis_row + 3
+
+    # Заголовок таблицы
+    table_headers = ["Месяц", "План (накопл.)", "Факт (накопл.)", "% выполнения"]
+    for c, h in enumerate(table_headers, start=1):
+        cell = ws.cell(row=table_row, column=c, value=h)
+        cell.font = Font(bold=True, size=11, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="2E75B6")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _CELL_BORDER
+
+    # Накопительные итоги по месяцам
+    cum_plan = 0.0
+    cum_fact = 0.0
+    for i, m in enumerate(months):
+        cum_plan += data_plan.get(m, 0.0)
+        cum_fact += data_fact.get(m, 0.0)
+        pct_m = (cum_fact / cum_plan) if cum_plan else 0.0
+
+        r = table_row + 1 + i
+        row_vals = [
+            _MONTHS_RU_LOWER[m].capitalize(),
+            round(cum_plan, 0),
+            round(cum_fact, 0),
+            round(pct_m, 4),
+        ]
+        for c, v in enumerate(row_vals, start=1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.font = Font(size=10, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F3864")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = _CELL_BORDER
+            if c in (2, 3):
+                cell.number_format = '#,##0'
+            elif c == 4:
+                cell.number_format = '0.0%'
+
+    # Итоговая строка «Итого»
+    total_row = table_row + 1 + len(months)
+    total_vals = [
+        "Итого",
+        round(sum_plan, 0),
+        round(sum_fact, 0),
+        round(pct, 4),
+    ]
+    for c, v in enumerate(total_vals, start=1):
+        cell = ws.cell(row=total_row, column=c, value=v)
+        cell.font = Font(bold=True, size=11, color="FFC000")
+        cell.fill = PatternFill("solid", fgColor="2E75B6")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _CELL_BORDER
+        if c in (2, 3):
+            cell.number_format = '#,##0'
+        elif c == 4:
+            cell.number_format = '0.0%'
+
+    # Ширина столбцов таблицы
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions[get_column_letter(2)].width = 18
+    ws.column_dimensions[get_column_letter(3)].width = 18
+    ws.column_dimensions[get_column_letter(4)].width = 16
+
+    # ---- 9. Тёмно-синий фон ----
+    bg = PatternFill("solid", fgColor="1F3864")
+    # Фон для всего листа — до последней строки таблицы
+    for r in range(1, total_row + 1):
+        for c in range(1, sum_col + 2):
+            cell = ws.cell(row=r, column=c)
+            # Пропускаем MergedCell — у них нельзя менять ни value, ни fill
+            if type(cell).__name__ == "MergedCell":
+                continue
+            if cell.value is None:
+                cell.fill = bg
+
+    # Скрываем сетку Excel
+    ws.sheet_view.showGridLines = False
+    return ws
+
     # ---- 9. Тёмно-синий фон ----
     bg = PatternFill("solid", fgColor="1F3864")
     for r in range(1, axis_row + 2):
