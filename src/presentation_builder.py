@@ -313,6 +313,48 @@ def _find_object_fot(rows, section, unit, object_name):
 
     return result
 
+def _collect_breakeven(rows, months):
+    """
+    Возвращает {unit_name: {month: value}} — точку безубыточности
+    по каждому юниту.
+
+    ТБУ = |Производственные расходы| + |Косвенные расходы|,
+    рассчитанные для каждого юнита (по его объектам).
+
+    В ОПиУ секции «Производственные расходы» и «Косвенные расходы»
+    имеют структуру:
+       · <Юнит>          ← level 1
+       ·· <Объект>       ← level 2
+       ··· <Статья>      ← level 3+
+    Берём суммы по всем объектам юнита.
+    """
+    _SECTION_PROD = "Производственные расходы"
+    _SECTION_INDIRECT = "Косвенные расходы"
+
+    result = {u: {m: 0.0 for m in months} for u in _UNITS}
+
+    cur_section = None
+    cur_unit = None
+
+    for r, lvl, title, values in rows:
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            continue
+
+        if lvl == 1:
+            cur_unit = title
+            continue
+
+        # level 2 (объект) в нужной секции
+        if (lvl == 2
+                and cur_unit in _UNITS
+                and cur_section in (_SECTION_PROD, _SECTION_INDIRECT)):
+            for m in months:
+                v = values.get(m, 0.0) or 0.0
+                result[cur_unit][m] += abs(v)
+
+    return result
 
 # ============================================================
 # ШАГ 3. СБОРКА ДАННЫХ
@@ -594,6 +636,69 @@ def _sheet_fot(wb, sheet_title, chart_title, subtitle,
 
     ws.add_chart(chart, "E4")
 
+def _sheet_breakeven(wb, sheet_title, chart_title, subtitle,
+                     data_revenue, data_breakeven, months):
+    """
+    Лист «Точка безубыточности» — две линии:
+      • синяя — Выручка
+      • зелёная — Точка безубыточности
+
+    Данные берём помесячно: для каждого месяца своё значение.
+    """
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Выручка", "Точка безубыточности"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_revenue.get(m, 0.0) or 0.0, 2),
+            round(data_breakeven.get(m, 0.0) or 0.0, 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    # Синяя линия — Выручка
+    chart.series[0].graphicalProperties.line.solidFill = "4472C4"
+    chart.series[0].graphicalProperties.line.width = 25000
+    chart.series[0].smooth = True
+
+    # Зелёная линия — Точка безубыточности
+    chart.series[1].graphicalProperties.line.solidFill = "70AD47"
+    chart.series[1].graphicalProperties.line.width = 25000
+    chart.series[1].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
 
 # ============================================================
 # ГЛАВНАЯ ФУНКЦИЯ
@@ -982,6 +1087,11 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         print("[presentation_builder] _collect_units вернул пусто")
         return output_path
 
+    # Собираем данные для точек безубыточности.
+    # Это делается один раз, а используется ниже
+    # при построении листов Сл06, Сл44, Сл63.
+    breakeven_data = _collect_breakeven(rows, months)
+
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
@@ -1122,6 +1232,54 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                         plan_label=f"ЧП {unit_name} план (с НДС)",
                         fact_label=f"ЧП {unit_name} факт (с НДС)",
                     )
+
+    # --------------------------------------------------------
+    # 1b. Точки безубыточности (слайды 6, 44, 63)
+    # --------------------------------------------------------
+    # Слайд 6 — ТБУ Латвия
+    if "Latvia" in units:
+        lat = units["Latvia"]
+        _sheet_breakeven(
+            wb,
+            sheet_title=_sheet_name_with_slide(6, "ТБУ_Latvia"),
+            chart_title="Точка безубыточности Латвия",
+            subtitle="ТБУ Латвия",
+            data_revenue=lat["revenue"],
+            data_breakeven=breakeven_data.get("Latvia", {}),
+            months=months,
+        )
+
+    # Слайд 44 — ТБУ East-Восток
+    if "East-Восток" in units:
+        east = units["East-Восток"]
+        _sheet_breakeven(
+            wb,
+            sheet_title=_sheet_name_with_slide(44, "ТБУ_East-Восток"),
+            chart_title="Точка безубыточности Estate - Восток",
+            subtitle="ТБУ Восток (Все юниты, УК)",
+            data_revenue=east["revenue"],
+            data_breakeven=breakeven_data.get("East-Восток", {}),
+            months=months,
+        )
+
+    # Слайд 63 — ТБУ Estate (консолидированно: Latvia + East-Восток + Europe)
+    estate_rev = {m: 0.0 for m in months}
+    estate_be = {m: 0.0 for m in months}
+    for u_name in ("Latvia", "East-Восток", "Europe"):
+        if u_name in units:
+            for m in months:
+                estate_rev[m] += units[u_name]["revenue"].get(m, 0.0)
+                estate_be[m]  += breakeven_data.get(u_name, {}).get(m, 0.0)
+
+    _sheet_breakeven(
+        wb,
+        sheet_title=_sheet_name_with_slide(63, "ТБУ_Estate"),
+        chart_title="Точка безубыточности Estate",
+        subtitle="ТБУ Estate",
+        data_revenue=estate_rev,
+        data_breakeven=estate_be,
+        months=months,
+    )
 
     # --------------------------------------------------------
     # 2. Объекты Латвии
