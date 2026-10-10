@@ -55,7 +55,7 @@ for _d in (OUTPUT_DIR, TEMP_DIR, TEMP_OPIU_DIR, TEMP_FORECAST_DIR,
 # ============================================================
 
 _DEFAULT_YEAR  = 2026
-_DEFAULT_MONTH = 8
+_DEFAULT_MONTH = 9
 
 
 # ============================================================

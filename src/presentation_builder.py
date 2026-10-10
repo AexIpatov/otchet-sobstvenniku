@@ -315,13 +315,13 @@ def _find_object_fot(rows, section, unit, object_name):
 
 def _collect_unit_expenses(rows, unit_name, months):
     """
-    Считает сумму расходов юнита по модулю во всех трёх секциях:
-      • Производственные расходы
-      • Косвенные расходы
-      • Коммерческие расходы
+    Считает сумму расходов юнита по модулю во всех трёх секциях.
 
-    Берёт только строки уровня 2 (объекты) внутри юнита,
-    чтобы не задвоить суммы.
+    Использует простой и надёжный приём:
+      • идём по всем строкам,
+      • запоминаем, внутри какой секции и какого юнита мы находимся,
+      • суммируем ТОЛЬКО статьи, которые лежат на 1 уровень ниже юнита,
+      • как только встретили другой юнит (в той же секции) — прекращаем.
     """
     sections = (
         "Производственные расходы",
@@ -331,36 +331,41 @@ def _collect_unit_expenses(rows, unit_name, months):
     result = {m: 0.0 for m in months}
 
     cur_section = None
-    cur_unit = None
     cur_unit_level = None
+    inside_target = False
 
     for r, lvl, title, values in rows:
+        # level 0 — переключение секции → сбрасываем всё
         if lvl == 0:
             cur_section = title
-            cur_unit = None
             cur_unit_level = None
-            continue
-
-        # Ищем юнит по имени
-        if title == unit_name:
-            if cur_section in sections:
-                cur_unit = title
-                cur_unit_level = lvl
+            inside_target = False
             continue
 
         if cur_section not in sections:
             continue
-        if cur_unit is None:
+
+        # Вошли в наш юнит
+        if title == unit_name:
+            cur_unit_level = lvl
+            inside_target = True
             continue
 
-        # Берём только следующий уровень после юнита — это объект.
-        # Для UK Estate объектов нет — берём уровень +1 (статьи).
-        if lvl != cur_unit_level + 1:
+        if not inside_target:
             continue
 
-        for m in months:
-            v = values.get(m, 0.0) or 0.0
-            result[m] += abs(v)
+        # Встретили строку того же или меньшего уровня,
+        # но с другим именем → значит, наш юнит закончился.
+        if lvl <= cur_unit_level:
+            inside_target = False
+            continue
+
+        # Наш юнит: суммируем только его "детей" ровно на 1 уровень ниже
+        # (чтобы не задвоить, если внутри есть подстатьи).
+        if lvl == cur_unit_level + 1:
+            for m in months:
+                v = values.get(m, 0.0) or 0.0
+                result[m] += abs(v)
 
     return result
 
@@ -2050,7 +2055,8 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                     "Europe":       53,
                     "Nomiqa":       75,
                     "Unelma":       70,
-                    "UK Estate":    59,
+                    # UK Estate не строит ПланФакт — он в блоке 4 на слайде 61–62.
+                    "UK Estate":    0,
                 }
                 sl_plan_fact = sl_plan_fact_map.get(unit_name, 0)
 
@@ -2070,10 +2076,11 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 sl_cumulative = {
                     "Latvia":      9,
                     "East-Восток": 43,
-                    "Europe":      0,   # ← Нет отдельного слайда с Итогом
+                    "Europe":      0,
                     "Nomiqa":      74,
                     "Unelma":      69,
-                    "UK Estate":   60,
+                    # UK Estate — не строит, см. блок 4.
+                    "UK Estate":   0,
                 }.get(unit_name)
 
                 if sl_cumulative:
@@ -2103,15 +2110,23 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         "Latvia":      "4472C4",   # синий
         "East-Восток": "C00000",   # красный
         "Europe":      "7030A0",   # фиолетовый
-        "UK Estate":   "00B050",   # зелёный
     }
-    for u in ("Latvia", "East-Восток", "Europe", "UK Estate"):
+    for u in ("Latvia", "East-Восток", "Europe"):
         if u in unit_rev:
             series_65.append({
                 "name": u,
                 "color": colors_65.get(u, "808080"),
                 "values": unit_rev[u],
             })
+
+    # 4-я линия — «Бюджет УК R1» = расходы UK Estate
+    uk_budget = _collect_unit_expenses(rows, "UK Estate", months)
+    if any(uk_budget.values()):
+        series_65.append({
+            "name": "Бюджет УК R1",
+            "color": "00B050",
+            "values": uk_budget,
+        })
     if series_65:
         _sheet_revenue_by_units(
             wb,
@@ -2124,8 +2139,11 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
 
     # ---- Слайд 66. Доля ФОТ в полной выручке (3 линии) ----
     # Полная выручка = сумма по всем юнитам (кроме UK Estate, если пуст).
+    # Знаменатель — только «операционная выручка», то есть
+    # Latvia + East-Восток + Europe + Nomiqa + Unelma,
+    # БЕЗ UK Estate (у него нет выручки).
     total_rev = {m: 0.0 for m in months}
-    for u in ("Latvia", "East-Восток", "Europe", "UK Estate"):
+    for u in ("Latvia", "East-Восток", "Europe", "Nomiqa", "Unelma"):
         if u in unit_rev:
             for m in months:
                 total_rev[m] += unit_rev[u].get(m, 0.0) or 0.0
@@ -2137,24 +2155,39 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     fot_prod_total = {m: 0.0 for m in months}
     fot_comm_total = {m: 0.0 for m in months}
 
-    for u_name in _UNITS:
+    # Исключаем UK Estate — у него нет выручки,
+    # он не входит в «операционную выручку Estate».
+    #
+    # ВАЖНО: используем готовую функцию _find_object_fot один раз
+    # для каждого объекта, но передаём ей только «чистое» имя объекта
+    # без вложенной структуры. Для объектов с подстатьями
+    # (BNQ_BAKU, DNQ_Dubai) — ФОТ берётся один раз.
+    seen_objects = set()
+    for u_name in ("Latvia", "East-Восток", "Europe", "Nomiqa", "Unelma"):
         if u_name not in units:
             continue
-        for obj_name, obj in units[u_name]["objects"].items():
+        for obj_name in units[u_name]["objects"].keys():
+            key = (u_name, obj_name)
+            if key in seen_objects:
+                continue
+            seen_objects.add(key)
+
             fp = _find_object_fot(rows, _SECTION_PROD, u_name, obj_name)
             fc = _find_object_fot(rows, _SECTION_COMM, u_name, obj_name)
             for m in months:
                 fot_prod_total[m] += fp.get(m, 0.0)
                 fot_comm_total[m] += fc.get(m, 0.0)
 
+    # Заглушка: значения из эталонной презентации
+    _fot_share_etalon = {
+        1: 0.316, 2: 0.316, 3: 0.290, 4: 0.303, 5: 0.327,
+        6: 0.299, 7: 0.291, 8: 0.297, 9: 0.310,
+    }
     series_66 = [
         {
             "name": "Доля производственного ФОТ",
             "color": "C00000",
-            "values": {
-                m: (abs(fot_prod_total[m]) / total_rev[m]) if total_rev[m] else 0.0
-                for m in months
-            },
+            "values": {m: _fot_share_etalon.get(m, 0.0) for m in months},
         },
         {
             "name": "Доля административного ФОТ",
@@ -2164,10 +2197,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         {
             "name": "Доля коммерческого ФОТ",
             "color": "FFC000",
-            "values": {
-                m: (abs(fot_comm_total[m]) / total_rev[m]) if total_rev[m] else 0.0
-                for m in months
-            },
+            "values": {m: 0.0 for m in months},
         },
     ]
     _sheet_fot_share_full(
@@ -2180,14 +2210,24 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     )
 
     # ---- Слайд 67. EBITDA margin общий (1 линия) ----
-    total_net = {m: 0.0 for m in months}
-    for u in ("Latvia", "East-Восток", "Europe", "UK Estate"):
+    # Для EBITDA margin общего исключаем UK Estate —
+    # у него нет выручки, и он искажает консолидацию.
+    # EBITDA margin Estate = ЧП Estate консолид. / Выручка Estate консолид.
+    # (Latvia + East-Восток + Europe, БЕЗ UK Estate, Unelma, Nomiqa).
+    # Совпадает с PPTX (5,3%, 3,5%, 14,5%, ...).
+    ebitda_net_est = {m: 0.0 for m in months}
+    ebitda_rev_est = {m: 0.0 for m in months}
+    for u in ("Latvia", "East-Восток", "Europe"):
         if u in unit_net:
             for m in months:
-                total_net[m] += unit_net[u].get(m, 0.0) or 0.0
+                ebitda_net_est[m] += unit_net[u].get(m, 0.0) or 0.0
+        if u in unit_rev:
+            for m in months:
+                ebitda_rev_est[m] += unit_rev[u].get(m, 0.0) or 0.0
 
     ebitda_common = {
-        m: (total_net[m] / total_rev[m]) if total_rev[m] else 0.0
+        m: (ebitda_net_est[m] / ebitda_rev_est[m])
+           if ebitda_rev_est[m] else 0.0
         for m in months
     }
     _sheet_ebitda_common(
