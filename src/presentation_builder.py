@@ -1523,8 +1523,9 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     ws.column_dimensions[get_column_letter(box_col)].width = 14
 
     # ---- 4. Скрываем строки с данными (ПОСЛЕ add_chart) ----
-    for r in (header_row, fact_row, plan_row):
-        ws.row_dimensions[r].hidden = True
+    # Временно отключено для диагностики:
+    # for r in (header_row, fact_row, plan_row):
+    #     ws.row_dimensions[r].hidden = True
 
     ws.sheet_view.showGridLines = False
     return ws
