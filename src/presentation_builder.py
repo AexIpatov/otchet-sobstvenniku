@@ -439,14 +439,14 @@ def _parse_debts(debts_path, months):
     """
     Читает файл «таблица Долги и Численность сотрудников.xlsx».
 
-    Структура (согласно актуальному файлу):
+    Структура (актуальный файл):
       • Строка 1: «Долги по объектам аренды» (заголовок)
       • Строка 2: «Объект» | 2026-01-01 | 2026-02-01 | … (шапка с датами)
       • Строки 3..N: имя объекта | числа по месяцам
       • Пустые строки
       • Строка с «Численность сотрудников Estate» (заголовок)
-      • Следующая строка: даты (2026-01-01 | 2026-02-01 | …)
-      • Следующая строка: «Численность сотрудников Estate» | числа
+      • Пустая строка с датами в B..M
+      • Строка с «Численность сотрудников Estate» | числа
 
     Возвращает:
       {
@@ -468,7 +468,7 @@ def _parse_debts(debts_path, months):
     print(f"[_parse_debts] лист: {ws.title}, "
           f"строк: {ws.max_row}, колонок: {ws.max_column}")
 
-    # --- Ищем шапку «Объект» ---
+    # --- 1. Ищем шапку «Объект» ---
     header_row = None
     for r in range(1, min(30, ws.max_row + 1)):
         v = ws.cell(row=r, column=1).value
@@ -478,22 +478,23 @@ def _parse_debts(debts_path, months):
     if header_row is None:
         print("[_parse_debts] не найдена шапка «Объект»")
         return result
-    print(f"[_parse_debts] шапка найдена в строке {header_row}")
+    print(f"[_parse_debts] шапка «Объект» — строка {header_row}")
 
-    # --- Собираем {month: col} из дат в шапке ---
+    # --- 2. Собираем {month: col} из дат в шапке ---
     month_col = {}
     for c in range(2, ws.max_column + 1):
         v = ws.cell(row=header_row, column=c).value
         if isinstance(v, (_dt.datetime, _dt.date)):
             if v.month in months:
                 month_col[v.month] = c
-    print(f"[_parse_debts] найдено колонок месяцев: {len(month_col)}")
+    print(f"[_parse_debts] колонок с датами в шапке: {len(month_col)}")
+    print(f"[_parse_debts]   month_col = {month_col}")
 
     if not month_col:
         print("[_parse_debts] в шапке нет дат нужных месяцев")
         return result
 
-    # --- Идём по строкам данных до строки «Численность...» ---
+    # --- 3. Идём по строкам данных до строки «Численность...» ---
     headcount_header_row = None
     for r in range(header_row + 1, ws.max_row + 1):
         name = _clean(ws.cell(row=r, column=1).value)
@@ -509,41 +510,65 @@ def _parse_debts(debts_path, months):
         result["debts"][name] = vals
 
     print(f"[_parse_debts] объектов с долгами: {len(result['debts'])}")
+    for k in result["debts"]:
+        print(f"[_parse_debts]   • {k}")
 
-    # --- Парсим численность ---
+    # --- 4. Парсим численность ---
     if headcount_header_row is not None:
-        # Строка с «Численность сотрудников Estate» (заголовок)
-        # Следующая строка — с датами
-        # Ещё следующая — с числами
-        hc_row = headcount_header_row + 2
-        v1 = _clean(ws.cell(row=hc_row, column=1).value)
-        if "численность" not in v1.lower():
-            # Пробуем +1
-            for rr in range(headcount_header_row + 1,
-                            min(headcount_header_row + 5, ws.max_row + 1)):
-                v = _clean(ws.cell(row=rr, column=1).value)
-                if "численность" in v.lower():
-                    hc_row = rr
-                    break
+        print(f"[_parse_debts] блок «Численность» — строка {headcount_header_row}")
 
-        # Ищем строку с датами для численности
-        hc_month_col = {}
-        for rr in (headcount_header_row + 1, headcount_header_row):
-            for c in range(2, ws.max_column + 1):
-                v = ws.cell(row=rr, column=c).value
-                if isinstance(v, (_dt.datetime, _dt.date)):
-                    if v.month in months:
-                        hc_month_col[v.month] = c
-            if hc_month_col:
-                break
+        # Идём вниз от headcount_header_row, ищем:
+        #   • строку с датами (числа datetime в B..M)
+        #   • строку с числами (значения в B..M)
+        #
+        # Структура блока: заголовок → строка с датами → строка с числами.
+        # Между ними могут быть пустые ячейки в столбце A.
 
-        if not hc_month_col:
-            hc_month_col = month_col
+        hc_dates_row = None
+        hc_values_row = None
 
-        for m, col in hc_month_col.items():
-            result["headcount"][m] = _num(ws, hc_row, col)
+        for rr in range(headcount_header_row + 1,
+                        min(headcount_header_row + 10, ws.max_row + 1)):
+            a_val = ws.cell(row=rr, column=1).value
+            # Считаем строку «датой-строкой», если в B..M есть datetime
+            has_dates = any(
+                isinstance(ws.cell(row=rr, column=c).value, (_dt.datetime, _dt.date))
+                for c in range(2, min(ws.max_column, 25) + 1)
+            )
+            # Считаем строку «числовой», если в B..M есть int/float
+            has_numbers = any(
+                isinstance(ws.cell(row=rr, column=c).value, (int, float))
+                and not isinstance(ws.cell(row=rr, column=c).value, bool)
+                for c in range(2, min(ws.max_column, 25) + 1)
+            )
 
-        print(f"[_parse_debts] численность: {result['headcount']}")
+            if has_dates and hc_dates_row is None:
+                hc_dates_row = rr
+            elif has_numbers and hc_dates_row is not None and hc_values_row is None:
+                hc_values_row = rr
+
+        print(f"[_parse_debts]   строка с датами: {hc_dates_row}")
+        print(f"[_parse_debts]   строка с числами: {hc_values_row}")
+
+        # Если нашли строку с числами — берём колонки месяцев из строки дат,
+        # либо (если дат нет) — из шапки долгов.
+        if hc_values_row is not None:
+            hc_month_col = {}
+            if hc_dates_row is not None:
+                for c in range(2, ws.max_column + 1):
+                    v = ws.cell(row=hc_dates_row, column=c).value
+                    if isinstance(v, (_dt.datetime, _dt.date)):
+                        if v.month in months:
+                            hc_month_col[v.month] = c
+            if not hc_month_col:
+                hc_month_col = month_col
+
+            for m, col in hc_month_col.items():
+                result["headcount"][m] = _num(ws, hc_values_row, col)
+
+            print(f"[_parse_debts] численность: {result['headcount']}")
+        else:
+            print("[_parse_debts] не найдена строка с числами в блоке «Численность»")
     else:
         print("[_parse_debts] блок «Численность» не найден")
 
