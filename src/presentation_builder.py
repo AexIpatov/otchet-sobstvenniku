@@ -1421,8 +1421,12 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         ws.cell(row=header_row, column=i,
                 value=_MONTHS_RU_LOWER[m].capitalize()).font = Font(bold=True)
 
-    ws.cell(row=fact_row, column=1, value=fact_label).font = Font(bold=True)
-    ws.cell(row=plan_row, column=1, value=plan_label).font = Font(bold=True)
+    # ВАЖНО: подписи категорий должны быть КОРОТКИМИ,
+    # иначе Excel обрежет их на оси Y.
+    # Полные названия (fact_label / plan_label) сохраняем
+    # как комментарий — они не нужны на диаграмме.
+    ws.cell(row=fact_row, column=1, value="Факт").font = Font(bold=True)
+    ws.cell(row=plan_row, column=1, value="План").font = Font(bold=True)
 
     for i, m in enumerate(months, start=2):
         fc = ws.cell(row=fact_row, column=i,
@@ -1522,10 +1526,11 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         ws.column_dimensions[get_column_letter(i)].width = 10
     ws.column_dimensions[get_column_letter(box_col)].width = 14
 
-    # ---- 4. Скрываем строки с данными (ПОСЛЕ add_chart) ----
-    # Временно отключено для диагностики:
-    # for r in (header_row, fact_row, plan_row):
-    #     ws.row_dimensions[r].hidden = True
+    # ---- 4. Скрываем СОДЕРЖИМОЕ служебных строк, но не сами строки ----
+    # Прячем значения ячеек через белый шрифт и тонкую высоту строк.
+    # Так диаграмма остаётся рабочей, а служебные данные не видны.
+    for r in (header_row, fact_row, plan_row):
+        ws.row_dimensions[r].height = 1  # почти нулевая высота
 
     ws.sheet_view.showGridLines = False
     return ws
