@@ -1070,19 +1070,35 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             plan_vals = _parse_bdr_plan(bdr_path, unit_name, months)
             # Проверяем, что план не пустой (иначе смысла в листе нет)
             if any(abs(v) > 0.01 for v in plan_vals.values()):
-                # Номер слайда «План/Факт» берём следующий за Долей ФОТ
-                # (у Латвии это слайд 8, у Антонияса — 12 и т.д.)
-                sl_plan_fact = sl_fot + 1 if sl_fot else 0
-                _sheet_plan_fact(
-                    wb,
-                    sheet_title=_sheet_name_with_slide(
-                        sl_plan_fact, f"ПланФакт_{unit_name}"),
-                    chart_title=f"Выполнение годового плана по ЧП {unit_name}",
-                    subtitle=f"План (БДиР) vs Факт (ОПиУ) — {unit_name}",
-                    data_plan=plan_vals,
-                    data_fact=u["net"],
-                    months=months,
-                )
+                # Номер слайда «ПланФакт» — для каждого юнита свой
+                # (см. карту слайдов презентации 2026_09):
+                #   Latvia       — 8
+                #   East-Восток  — 41
+                #   Europe       — 53
+                #   Nomiqa       — 75
+                #   Unelma       — 70
+                #   UK Estate    — 59
+                sl_plan_fact_map = {
+                    "Latvia":       8,
+                    "East-Восток":  41,
+                    "Europe":       53,
+                    "Nomiqa":       75,
+                    "Unelma":       70,
+                    "UK Estate":    59,
+                }
+                sl_plan_fact = sl_plan_fact_map.get(unit_name, 0)
+
+                if sl_plan_fact:
+                    _sheet_plan_fact(
+                        wb,
+                        sheet_title=_sheet_name_with_slide(
+                            sl_plan_fact, f"ПланФакт_{unit_name}"),
+                        chart_title=f"Выполнение годового плана по ЧП {unit_name}",
+                        subtitle=f"План (БДиР) vs Факт (ОПиУ) — {unit_name}",
+                        data_plan=plan_vals,
+                        data_fact=u["net"],
+                        months=months,
+                    )
 
                             # Нарастающий итог (слайд 9 для Латвии и т.д.)
                 sl_cumulative = {
