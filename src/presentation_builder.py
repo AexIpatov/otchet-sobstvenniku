@@ -1085,35 +1085,20 @@ def _collect_dds(odds_path, unit_name, months):
 
     # 3) Берём следующие две строки с числами сразу после юнита.
     #    В ОДДС у Latvia:
-    #      строка N   — юнит «Latvia» (данных нет)
+    #      строка N   — юнит «Latvia»
     #      строка N+1 — АГРЕГАТ поступлений (A пустой, есть числа)
     #      строка N+2 — АГРЕГАТ выбытий (A пустой, есть числа)
-    #      строка N+3 — первый объект «· AN14 …» (A не пустой)
+    #      строка N+3 — первый объект «· AN14 …»
     #
-    # ВАЖНО: определяем «есть ли данные в строке» по месяцам,
-    # а не по столбцу A. A у агрегатов пустой, но не у всех строк.
-    collected = 0
-    for r in range(unit_row + 1, unit_row + 10):
-        vals = {m: _num(ws, r, col) for m, col in month_col.items()}
+    # Нам нужны именно строки N+1 и N+2. Пропускать их нельзя.
+    inflow_row = unit_row + 1
+    outflow_row = unit_row + 2
 
-        # Пропускаем пустые строки (нет чисел по месяцам)
-        if not any(v != 0.0 for v in vals.values()):
-            continue
-
-        # Первая числовая строка — поступления
-        if collected == 0:
-            for m in months:
-                result["inflow"][m] = vals.get(m, 0.0) or 0.0
-        # Вторая числовая строка — выбытия (по модулю)
-        elif collected == 1:
-            for m in months:
-                result["outflow"][m] = abs(vals.get(m, 0.0) or 0.0)
-        else:
-            break
-
-        collected += 1
-        if collected >= 2:
-            break
+    for m, col in month_col.items():
+        # Поступления
+        result["inflow"][m] = _num(ws, inflow_row, col) or 0.0
+        # Выбытия (берём по модулю)
+        result["outflow"][m] = abs(_num(ws, outflow_row, col) or 0.0)
 
     return result
 
