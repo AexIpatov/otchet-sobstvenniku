@@ -1776,19 +1776,23 @@ def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
 # Лист: «Возмещение коммунальных услуг» (слайды 25, 27, 29)
 # ------------------------------------------------------------
 def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
-                                  ku_path, month_name):
+                                  ku_path, month_name, subtract_object=None):
     """
     Создаёт лист с таблицей возмещения коммунальных услуг.
 
     ku_path — путь к файлу «Возмещение КУ...xlsx» (лист «Сентябрь» или
               соответствующий month_name).
     month_name — название месяца (например, «Сентябрь»).
+    subtract_object — если задано (например, "AC89 Чака"), то из строки
+                      «Итого» вычитается строка с этим объектом. Результат
+                      записывается одной строкой. Используется для слайда 27
+                      («с НДС кроме Чака 89»).
 
     Столбцы:
       A — Объекты
       B — (пусто)
-      C — (пусто)  ← по требованию
-      D — (пусто)  ← по требованию
+      C — (пусто)
+      D — (пусто)
       E — 1.2.10.1 Мусор
       F — 1.2.10.2 Газ
       G — 1.2.10.3 Вода
@@ -1796,9 +1800,8 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
       I — 1.2.10.5 Электричество
       J — 1.2.10.6 Коммунальные УК дома
       K — Всего расходов на коммунальные услуги
-      L — Разница между выставленными счетами и фактическими
-          коммунальными расходами за отчётный месяц (гр. 3 – гр. 11)
-      M — 1.1.2.3 Компенсация по коммунальным расходам — Поступившая
+      L — Разница за отчётный месяц
+      M — Компенсация поступившая
       N — Задолженность по возмещению КУ за отчётный месяц
     """
     ws = wb.create_sheet(sheet_title)
@@ -1863,7 +1866,49 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
     # M — Компенсация поступившая
     # N — Задолженность
 
-    # --- Заполняем строки ---
+    # --- Режим «Итого минус объект» (для слайда 27) ---
+    if subtract_object:
+        total_row_src = None
+        for r in range(data_start_row, ws_ku.max_row + 1):
+            obj_name = _clean(ws_ku.cell(row=r, column=1).value)
+            if obj_name and "итого" in obj_name.lower():
+                total_row_src = r
+                break
+
+        sub_row_src = None
+        for r in range(data_start_row, ws_ku.max_row + 1):
+            obj_name = _clean(ws_ku.cell(row=r, column=1).value)
+            if obj_name and subtract_object.lower() in obj_name.lower():
+                sub_row_src = r
+                break
+
+        if total_row_src is None or sub_row_src is None:
+            print(f"[presentation_builder] не найдены строки для вычитания "
+                  f"в файле {ku_path}: Итого={total_row_src}, {subtract_object}={sub_row_src}")
+            return ws
+
+        row_out = header_row + 1
+        ws.cell(row=row_out, column=1,
+                value=f"Итого (без {subtract_object})").font = Font(bold=True)
+        ws.cell(row=row_out, column=1).border = _CELL_BORDER
+        for c in range(2, 5):
+            ws.cell(row=row_out, column=c).border = _CELL_BORDER
+
+        for c in range(5, 15):
+            v_total = _num(ws_ku, total_row_src, c)
+            v_sub   = _num(ws_ku, sub_row_src, c)
+            v_diff  = v_total - v_sub
+            cell = ws.cell(row=row_out, column=c, value=round(v_diff, 2))
+            cell.border = _CELL_BORDER
+            cell.number_format = '#,##0'
+
+        ws.column_dimensions["A"].width = 30
+        for c in range(2, 15):
+            ws.column_dimensions[get_column_letter(c)].width = 14
+
+        return ws
+
+    # --- Обычный режим: перебираем все объекты ---
     row_out = header_row + 1
     data_rows = []
     for r in range(data_start_row, ws_ku.max_row + 1):
@@ -3072,18 +3117,18 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         (25, "Возмещение_КУ_с_НДС",
          "Возмещение Коммунальных услуг с НДС",
          f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года с НДС, EUR",
-         config.KU_FILE_WITH_VAT_ALL),
+         ku_files_found["with_vat_all"], None),
         (27, "Возмещение_КУ_с_НДС_кроме_Чака",
          "Возмещение Коммунальных услуг с НДС кроме Чака 89",
          f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года (с НДС кроме Чака 89), EUR",
-         config.KU_FILE_WITH_VAT_NO_CHAKA),
+         ku_files_found["with_vat_all"], "AC89 Чака"),
         (29, "Возмещение_КУ_без_НДС",
          "Возмещение Коммунальных услуг без НДС по всем",
          f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года без НДС по всем, EUR",
-         config.KU_FILE_WITHOUT_VAT_ALL),
+         ku_files_found["without_vat_all"], None),
     ]
 
-    for slide_no, base_name, chart_title, subtitle, ku_path in ku_specs:
+    for slide_no, base_name, chart_title, subtitle, ku_path, subtract_object in ku_specs:
         if ku_path and os.path.exists(ku_path):
             _sheet_utility_reimbursement(
                 wb,
@@ -3092,9 +3137,10 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 subtitle=subtitle,
                 ku_path=ku_path,
                 month_name=month_name_ru,
+                subtract_object=subtract_object,
             )
         else:
-            print(f"[presentation_builder] не найден файл КУ для слайда {slide_no}: {ku_path}")
+            print(f"[presentation_builder] не найден файл КУ для слайда {slide_no}")
 
     # --------------------------------------------------------
     # 3c. Долги (слайды 14, 19, 24) и Численность (слайд 64)
