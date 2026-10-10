@@ -1777,61 +1777,65 @@ def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
 # ------------------------------------------------------------
 def _find_ku_sheet(wb_ku, month_name):
     """
-    Ищет в книге лист, на котором есть таблица возмещения КУ
-    (а не блок ОДДС).
+    Ищет в книге лист, на котором есть таблица возмещения КУ.
 
     Признак таблицы КУ:
       • в столбце A есть ячейка «Объекты»,
-      • ниже есть строка «Итого»,
+      • ниже (в пределах 30 строк) есть строка «Итого»,
       • в первой строке данных столбец E (Мусор) содержит
-        ПОЛОЖИТЕЛЬНОЕ число (в ОДДС там отрицательные — списания).
+        ПОЛОЖИТЕЛЬНОЕ число (в блоке ОДДС там отрицательные).
 
-    Сначала пробует лист с именем month_name (например, «Сентябрь»).
-    Если его нет — перебирает все листы.
+    Если лист не найден — возвращает первый лист, где есть «Объекты».
+    Если и такого нет — активный лист.
     """
     def _looks_like_ku(ws):
         header_row = None
-        for r in range(1, 15):
+        for r in range(1, 20):
             v = _clean(ws.cell(row=r, column=1).value)
             if v and "объекты" in v.lower():
                 header_row = r
                 break
         if header_row is None:
             return False
-        # Проверяем: есть ли ниже «Итого» и положительное ли E у первой строки данных
+        # Ищем «Итого» в пределах 30 строк после шапки
         has_total = False
-        for r in range(header_row + 1, min(header_row + 30, ws.max_row + 1)):
+        for r in range(header_row + 1,
+                       min(header_row + 30, ws.max_row + 1)):
             v = _clean(ws.cell(row=r, column=1).value)
             if v and "итого" in v.lower():
                 has_total = True
                 break
         if not has_total:
             return False
-        # Первая строка данных
-        first_data = header_row + 1
-        e_val = _num(ws, first_data, 5)
-        if e_val <= 0:
-            # Возможно, объект с нулём в E — попробуем следующую строку
-            for r in range(first_data, min(first_data + 5, ws.max_row + 1)):
-                e_val = _num(ws, r, 5)
-                if e_val > 0:
-                    return True
-            return False
-        return True
+        # Проверяем, что первая строка данных — положительная (расходы),
+        # а не отрицательная (списания из ОДДС).
+        for r in range(header_row + 1,
+                       min(header_row + 5, ws.max_row + 1)):
+            e_val = _num(ws, r, 5)
+            if e_val > 0:
+                return True
+            # Если встретили отрицательное — это блок ОДДС
+            if e_val < 0:
+                return False
+        return False
 
-    # 1) Пробуем по имени
-    if month_name in wb_ku.sheetnames:
-        ws = wb_ku[month_name]
-        if _looks_like_ku(ws):
-            return ws
-    # 2) Перебираем все листы
+    # 1) Перебираем все листы — ищем таблицу КУ
     for ws in wb_ku.worksheets:
         if _looks_like_ku(ws):
             return ws
-    # 3) Fallback — по имени, если есть
+
+    # 2) Fallback: лист с именем month_name
     if month_name in wb_ku.sheetnames:
         return wb_ku[month_name]
-    # 4) Fallback — активный лист
+
+    # 3) Fallback: первый лист, где есть «Объекты»
+    for ws in wb_ku.worksheets:
+        for r in range(1, 20):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "объекты" in v.lower():
+                return ws
+
+    # 4) Fallback: активный лист
     return wb_ku.active
 
 def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
@@ -3180,17 +3184,6 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # Слайд 29 — «Возмещение Коммунальных услуг без НДС по всем»
     month_name_ru = _MONTHS_RU_LOWER.get(month, "сентябрь").capitalize()
 
-    # Ищем файлы КУ в папке TEMP_KU_DIR.
-    # Пользователь загружает два файла ОДДС:
-    #   - «ОДДС 01.01.2026-30.09.2026 с НДС.xlsx»
-    #   - «ОДДС 01.01.2026-30.09.2026 без НДС.xlsx»
-    # Слайд 27 строится из файла «с НДС» с вычитанием Чака.
-    ku_with_vat = config.find_ku_file_with_vat()
-    ku_without_vat = config.find_ku_file_without_vat()
-
-    print(f"[presentation_builder] Файл КУ с НДС:    {ku_with_vat}")
-    print(f"[presentation_builder] Файл КУ без НДС:  {ku_without_vat}")
-
     # Ищем два файла ОДДС в папке TEMP_KU_DIR:
     #   - «... с НДС.xlsx»    → слайд 25
     #   - «... без НДС.xlsx»  → слайд 29
@@ -3399,9 +3392,9 @@ def _sort_sheets_by_slide_number(wb):
     """
     Пересортировывает листы книги по номеру слайда в имени листа.
 
-    Использует wb.move_sheet() — официальный API openpyxl.
-    Приём `wb._sheets = ...` не работает в свежих версиях openpyxl,
-    потому что листы хранятся как связный список внутри workbook.
+    Использует прямое перестроение списка wb._sheets — это самый
+    надёжный способ в openpyxl. wb.move_sheet() при многократных
+    вызовах даёт сбои (листы «съезжают»).
     """
     import re as _re
 
@@ -3414,16 +3407,10 @@ def _sort_sheets_by_slide_number(wb):
 
     try:
         desired = sorted(wb.worksheets, key=_slide_key)
-
-        for target_index, ws in enumerate(desired):
-            cur_index = wb.worksheets.index(ws)
-            if cur_index != target_index:
-                # Сдвигаем лист на позицию target_index
-                offset = target_index - cur_index
-                wb.move_sheet(ws, offset=offset)
-
+        # Прямая перестановка списка листов
+        wb._sheets = desired
         print(f"[presentation_builder] листы отсортированы, порядок: "
-              f"{[ws.title[:8] for ws in wb.worksheets]}")
+              f"{[ws.title[:10] for ws in wb.worksheets]}")
     except Exception as e:
         print(f"[presentation_builder] не удалось отсортировать листы: {e}")
 
