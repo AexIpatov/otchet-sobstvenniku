@@ -1404,13 +1404,11 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     Лист «Нарастающим итогом» — горизонтальная диаграмма с
     накоплениями (stacked bar chart).
 
-    Логика для chart.type="bar":
-      • Серии (месяцы) идут слева направо: январь → сентябрь.
-      • Категории идут снизу вверх: первая строка данных
-        оказывается ВНИЗУ диаграммы.
-      • Поэтому в данных СВЕРХУ размещаем «Факт» (чтобы он
-        оказался внизу диаграммы), а СНИЗУ — «План»
-        (чтобы он оказался сверху диаграммы).
+    Порядок операций ВАЖЕН:
+      1. Сначала пишем данные и запоминаем их диапазоны.
+      2. Затем добавляем диаграмму, привязывая к видимым ячейкам.
+      3. Только ПОСЛЕ этого скрываем служебные строки.
+      4. Иначе openpyxl/Excel может отрисовать диаграмму нулевой высоты.
     """
     ws = wb.create_sheet(sheet_title)
 
@@ -1440,7 +1438,7 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
                      value=float(data_plan.get(m, 0.0) or 0.0))
         pc.number_format = '#,##0'
 
-    # ---- 2. Горизонтальная диаграмма с накоплениями ----
+    # ---- 2. Диаграмма ----
     chart = BarChart()
     chart.type = "bar"
     chart.grouping = "stacked"
@@ -1472,10 +1470,6 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     chart.width = 32
     chart.height = 11
 
-    # НЕ ставим chart.title — заголовок уже есть в ячейке выше.
-    # НЕ переворачиваем оси — оставляем по умолчанию.
-
-    # Подписи внутри сегментов
     chart.dLbls = DataLabelList()
     chart.dLbls.showVal = True
     chart.dLbls.showSerName = False
@@ -1487,6 +1481,8 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     chart.legend.position = "t"
     chart.legend.overlay = False
 
+    # ВАЖНО: сначала добавляем диаграмму, потом скрываем строки.
+    # Якорь — на видимую пустую ячейку A6 (строки 2-4 ещё не скрыты).
     ws.add_chart(chart, "A6")
 
     # ---- 3. Блок итогов справа ----
@@ -1497,32 +1493,17 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     box_col = max(13, len(months) + 5)
     box_row = 2
 
-    # План
-    c_val = ws.cell(row=box_row, column=box_col,
-                    value=round(sum_plan, 0))
-    c_val.font = Font(bold=True, color="FFC000", size=14)
-    c_val.alignment = Alignment(horizontal="center", vertical="center")
-    c_val.fill = PatternFill("solid", fgColor="1F3864")
-    c_val.border = _CELL_BORDER
-    c_val.number_format = '#,##0'
-
-    # Факт
-    c_val = ws.cell(row=box_row + 1, column=box_col,
-                    value=round(sum_fact, 0))
-    c_val.font = Font(bold=True, color="FFC000", size=14)
-    c_val.alignment = Alignment(horizontal="center", vertical="center")
-    c_val.fill = PatternFill("solid", fgColor="1F3864")
-    c_val.border = _CELL_BORDER
-    c_val.number_format = '#,##0'
-
-    # %
-    c_val = ws.cell(row=box_row + 2, column=box_col,
-                    value=round(pct, 4))
-    c_val.font = Font(bold=True, color="FFC000", size=14)
-    c_val.alignment = Alignment(horizontal="center", vertical="center")
-    c_val.fill = PatternFill("solid", fgColor="1F3864")
-    c_val.border = _CELL_BORDER
-    c_val.number_format = '0.0%'
+    for i, (val, fmt) in enumerate([
+        (round(sum_plan, 0), '#,##0'),
+        (round(sum_fact, 0), '#,##0'),
+        (round(pct, 4),      '0.0%'),
+    ]):
+        c_val = ws.cell(row=box_row + i, column=box_col, value=val)
+        c_val.font = Font(bold=True, color="FFC000", size=14)
+        c_val.alignment = Alignment(horizontal="center", vertical="center")
+        c_val.fill = PatternFill("solid", fgColor="1F3864")
+        c_val.border = _CELL_BORDER
+        c_val.number_format = fmt
 
     # Ширина колонок
     ws.column_dimensions["A"].width = 22
@@ -1530,7 +1511,7 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         ws.column_dimensions[get_column_letter(i)].width = 10
     ws.column_dimensions[get_column_letter(box_col)].width = 14
 
-    # Скрываем служебные строки с данными
+    # ---- 4. Скрываем служебные строки (ПОСЛЕ add_chart) ----
     for r in (header_row, fact_row, plan_row):
         ws.row_dimensions[r].hidden = True
 
