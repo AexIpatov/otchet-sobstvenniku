@@ -554,16 +554,27 @@ with st.expander("📗 ОДДС для слайдов 25/27/29 (Возмещен
 
 with st.expander("📕 НДС (файлы «НДС ММ.ГГГГ <Статья>.xlsx»)", expanded=True):
     st.caption(
-        "Загрузите файлы НДС **за прошлый месяц** (для колонки C) "
-        "и **за текущий месяц** (для колонки H). "
-        "Файлы должны содержать в имени слово «НДС» и расширение `.xlsx`. "
-        "Например: `НДС 09.2026 Выручка от аренды.xlsx`."
+        "**Дополнительно для презентации:** загрузите файл вложений "
+        "`Вложенные средства на объекты.xlsx` — он используется для "
+        "расчёта ROI на слайде 70."
     )
-    vat_files = st.file_uploader(
-        "Выберите один или несколько файлов НДС (.xlsx)",
+    investment_files = st.file_uploader(
+        "Выберите файл вложений (.xlsx)",
         type=["xlsx"],
-        accept_multiple_files=True,
-        key="upload_vat",
+        accept_multiple_files=False,
+        key="upload_investments",
+    )
+
+    st.caption(
+        "**Дополнительно для презентации:** загрузите файл "
+        "`таблица Долги и Численность сотрудников.xlsx` — он используется "
+        "для слайдов 14, 19, 24, 64 (долги и численность сотрудников)."
+    )
+    debts_files = st.file_uploader(
+        "Выберите файл долгов и численности (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=False,
+        key="upload_debts",
     )
 
 
@@ -597,12 +608,22 @@ n_invest = _save_uploaded(
     [investment_files] if investment_files else [],
     config.REF_DIR,
 )
+n_debts = 0
+if debts_files is not None:
+    try:
+        config.REF_DIR.mkdir(parents=True, exist_ok=True)
+        debts_path = config.REF_DIR / "таблица Долги и Численность сотрудников.xlsx"
+        with open(debts_path, "wb") as out:
+            out.write(debts_files.getbuffer())
+        n_debts = 1
+    except Exception as e:
+        st.warning(f"Не удалось сохранить файл долгов: {e}")
 n_forecast = _save_uploaded(forecast_files, config.TEMP_FORECAST_DIR)
 n_ku = _save_uploaded(ku_files, config.TEMP_KU_DIR)
 n_vat = _save_uploaded(vat_files, config.TEMP_VAT_DIR)
 
 total_uploaded = (n_opiu + n_opiu_full + n_bdr + n_bdr_full +
-                  n_odds + n_invest + n_forecast + n_ku + n_vat)
+                  n_odds + n_invest + n_debts + n_forecast + n_ku + n_vat)
 
 if total_uploaded > 0:
     st.success(
@@ -612,6 +633,7 @@ if total_uploaded > 0:
         f"БДиР (единый) — {n_bdr_full}, "
         f"ОДДС — {n_odds}, "
         f"Вложений — {n_invest}, "
+        f"Долгов — {n_debts}, "
         f"Прогнозов — {n_forecast}, "
         f"Возмещение КУ — {n_ku}, НДС — {n_vat}."
     )
