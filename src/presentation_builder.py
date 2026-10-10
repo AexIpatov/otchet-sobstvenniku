@@ -2374,7 +2374,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 "OZ1 Озолниеки [Latvia]",
                 "V22 К. Валдемара 22 [Latvia]",
                 "UK_Latvia [Latvia]",
-                # BRN — 1 евро (в файле вложений его нет, добавляем вручную)
+                "BRN_Brunieku [Latvia]",  # <-- ДОБАВЛЕНО
             ],
             "virtual", "Коммерческие помещения LV",
             "FFC000",
