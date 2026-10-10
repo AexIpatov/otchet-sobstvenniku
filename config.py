@@ -916,23 +916,17 @@ TEMPLATE_ROW_MAP = {
 # Поэтому используем маски (glob) — ищем по ключевым словам.
 def find_ku_file_with_vat():
     """
-    Ищет в TEMP_KU_DIR файл «Возмещение КУ … с НДС.xlsx».
+    Ищет в TEMP_KU_DIR файл «ОДДС … с НДС.xlsx».
 
     Приоритет:
-      1) файл, в имени которого есть «возмещение» и «с ндс»,
-         и НЕТ «без ндс» и «кроме чака»;
-      2) любой файл «… с НДС.xlsx», НЕ начинающийся с «ОДДС»;
-      3) любой файл «… с НДС.xlsx».
-
-    ОДДС-файлы («ОДДС … с НДС.xlsx») игнорируются — у них
-    другая структура (строки-объекты с префиксами ·, столбцы-месяцы).
+      1) файл с «оддс» и «с ндс», без «без ндс» и «кроме чака»;
+      2) любой файл «… с НДС» (если «оддс» в имени нет).
     """
     if not TEMP_KU_DIR.exists():
         return None
 
-    ku_candidates = []       # «Возмещение КУ … с НДС»
-    non_odds = []            # «… с НДС», но не ОДДС
-    any_s_vat = []           # любой «… с НДС»
+    odds_files = []
+    other_files = []
 
     for f in TEMP_KU_DIR.glob("*.xlsx"):
         if f.name.startswith("~$"):
@@ -944,36 +938,31 @@ def find_ku_file_with_vat():
             continue
         if "с ндс" not in n:
             continue
+        if n.startswith("оддс") or "оддс" in n:
+            odds_files.append(f)
+        else:
+            other_files.append(f)
 
-        any_s_vat.append(f)
-
-        if "возмещение" in n:
-            ku_candidates.append(f)
-        elif not n.startswith("оддс"):
-            non_odds.append(f)
-
-    if ku_candidates:
-        return ku_candidates[0]
-    if non_odds:
-        return non_odds[0]
-    return any_s_vat[0] if any_s_vat else None
+    if odds_files:
+        return odds_files[0]
+    if other_files:
+        return other_files[0]
+    return None
 
 
 def find_ku_file_without_vat():
     """
-    Ищет в TEMP_KU_DIR файл «Возмещение КУ … без НДС.xlsx».
+    Ищет в TEMP_KU_DIR файл «ОДДС … без НДС.xlsx».
 
     Приоритет:
-      1) файл с «возмещение» и «без ндс»;
-      2) любой файл «… без НДС», НЕ начинающийся с «ОДДС»;
-      3) любой файл «… без НДС».
+      1) файл с «оддс» и «без ндс»;
+      2) любой файл «… без НДС» (если «оддс» в имени нет).
     """
     if not TEMP_KU_DIR.exists():
         return None
 
-    ku_candidates = []
-    non_odds = []
-    any_without = []
+    odds_files = []
+    other_files = []
 
     for f in TEMP_KU_DIR.glob("*.xlsx"):
         if f.name.startswith("~$"):
@@ -981,19 +970,16 @@ def find_ku_file_without_vat():
         n = f.name.lower()
         if "без ндс" not in n:
             continue
+        if n.startswith("оддс") or "оддс" in n:
+            odds_files.append(f)
+        else:
+            other_files.append(f)
 
-        any_without.append(f)
-
-        if "возмещение" in n:
-            ku_candidates.append(f)
-        elif not n.startswith("оддс"):
-            non_odds.append(f)
-
-    if ku_candidates:
-        return ku_candidates[0]
-    if non_odds:
-        return non_odds[0]
-    return any_without[0] if any_without else None
+    if odds_files:
+        return odds_files[0]
+    if other_files:
+        return other_files[0]
+    return None
 
 
 def find_ku_file_without_vat():
@@ -1035,4 +1021,40 @@ KU_OBJECTS = [
     "SK3-Skunju 3",
     "V22-Валдемара 22",
 ]
+
+
+# ============================================================
+# 18. МАППИНГ ИМЁН: KU_OBJECTS → ИМЕНА В ОДДС
+# ============================================================
+# В ОДДС-файлах («ОДДС 01.01.2026-30.09.2026 с НДС.xlsx» и
+# «... без НДС.xlsx») объекты называются длиннее, чем в KU_OBJECTS.
+# Здесь связываем короткое имя (для слайда) с реальным именем
+# в ОДДС (level 1, с префиксом «· »).
+KU_TO_ODDS_NAME = {
+    "AC89 Чака":           "AC89 Чака 89 (дом + парковка)",
+    "AН14-Антонияс14":     "AН14-Антонияс14",
+    "B117 Бривибас, 117":  "B117 Бривибас, 117",
+    "B78 Бривибас, 78":    "B78 Бривибас, 78",
+    "C23 Цесу, 23":        "C23 Цесу, 23",
+    "D4 Парковка-Deglava4":"D4 Парковка-Deglava4",
+    "DS1 Дзирнаву, 1":     "DS1 Дзирнаву, 1",
+    "G77 Гертрудес, 77":   "G73 Гертрудес, 73",
+    "Matisa 81":           "M81 - Matisa 81",
+    "Muceniku 3-4":        "MU3 - Mucenieku 3 - 4",
+    "SK3-Skunju 3":        "SK3-Skunju 3",
+    "V22-Валдемара 22":    "V22 К. Валдемара 22",
+}
+
+
+# ============================================================
+# 19. ПРАВИЛА ПОИСКА ФАЙЛОВ ОДДС ДЛЯ СЛАЙДОВ 25/27/29
+# ============================================================
+# Файлы ОДДС лежат в TEMP_KU_DIR (как и раньше — та же папка
+# «Возмещение КУ»). Но ищем мы теперь ОДДС-файлы, а не
+# «Возмещение КУ …xlsx».
+#
+# Слайд 25 — «с НДС»     → файл «ОДДС ... с НДС.xlsx»
+# Слайд 27 — «с НДС кроме Чака» → строим из файла «с НДС»,
+#                                вычитая строки объекта AC89 Чака
+# Слайд 29 — «без НДС»   → файл «ОДДС ... без НДС.xlsx»
 

@@ -1838,65 +1838,96 @@ def _find_ku_sheet(wb_ku, month_name):
     # 4) Fallback: активный лист
     return wb_ku.active
 
+def _find_odds_month_col(ws_ku, month_name):
+    """
+    Ищет в ОДДС-файле колонку с нужным месяцем.
+    Шапка: строка с «Направление» в столбце A.
+    В строке шапки ищем ячейку, где в тексте есть month_name
+    (например, «Сентябрь 2026» → колонка J).
+    Возвращает индекс колонки (1-based) или None.
+    """
+    header_row = None
+    for r in range(1, 8):
+        v = _clean(ws_ku.cell(row=r, column=1).value)
+        if v and "направление" in v.lower():
+            header_row = r
+            break
+    if header_row is None:
+        return None
+
+    mn = month_name.lower()
+    for c in range(2, ws_ku.max_column + 1):
+        v = ws_ku.cell(row=header_row, column=c).value
+        if v is None:
+            continue
+        sv = str(v).lower()
+        if mn in sv:
+            return c
+    return None
+
+
 def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
                                   ku_path, month_name, subtract_object=None):
     """
-    Создаёт лист с таблицей возмещения коммунальных услуг.
+    Создаёт лист с таблицей возмещения коммунальных услуг из ОДДС.
 
-    ku_path — путь к файлу «Возмещение КУ...xlsx» (лист «Сентябрь» или
-              соответствующий month_name).
+    ku_path — путь к файлу ОДДС («ОДДС … с НДС.xlsx» или
+              «ОДДС … без НДС.xlsx»).
     month_name — название месяца (например, «Сентябрь»).
-    subtract_object — если задано (например, "AC89 Чака"), то из строки
-                      «Итого» вычитается строка с этим объектом. Результат
-                      записывается одной строкой. Используется для слайда 27
-                      («с НДС кроме Чака 89»).
+    subtract_object — если задано (например, "AC89 Чака"), то
+                      строки этого объекта исключаются из вывода,
+                      а строка «Итого» считается как
+                      Итого(все) − Объект(subtract_object).
+                      Используется для слайда 27.
 
-    Столбцы:
-      A — Объекты
-      B — (пусто)
-      C — (пусто)
-      D — (пусто)
-      E — 1.2.10.1 Мусор
-      F — 1.2.10.2 Газ
-      G — 1.2.10.3 Вода
-      H — 1.2.10.4 Отопление
-      I — 1.2.10.5 Электричество
-      J — 1.2.10.6 Коммунальные УК дома
-      K — Всего расходов на коммунальные услуги
-      L — Разница за отчётный месяц
-      M — Компенсация поступившая
-      N — Задолженность по возмещению КУ за отчётный месяц
+    Структура ОДДС:
+      • level 0 — «Latvia» (направление);
+      • level 1 — объект («· AN14 Антониас 14 (дом + парковка)»);
+      • level 2 — «Списания» / «Сальдо»;
+      • level 3 — «1.2.10 Коммунальные платежи»;
+      • level 4 — «1.2.10.1 Мусор», «1.2.10.2  Газ», «1.2.10.3 Вода»,
+                  «1.2.10.4 Отопление», «1.2.10.5 Электричество»,
+                  «1.2.10.6 Коммунальные УК дома».
+    Данные за месяц — в колонке нужного месяца. Значения со знаком
+    минус (расходы), берём abs(...).
+
+    Столбцы итогового листа:
+      A — Объект
+      B, C, D — пусто (в ОДДС этих данных нет)
+      E — Мусор
+      F — Газ
+      G — Вода
+      H — Отопление
+      I — Электричество
+      J — Коммунальные УК дома
+      K — Всего расходов на коммунальные услуги (=SUM(E:J))
+      L, M, N — пусто
     """
     ws = wb.create_sheet(sheet_title)
     _write_header(ws, chart_title, subtitle)
 
-    # --- Шапка таблицы: три уровня, как в исходном файле КУ ---
-    # Строка 3 — «EUR» + названия групп столбцов.
-    # Строка 4 — «Объекты» (A) и пустые B..N.
-    # Строка 5 — номера столбцов 1..14.
+    # --- Шапка таблицы: три уровня, как в файле «Возмещение КУ» ---
     header_row_1 = 3   # группа
     header_row_2 = 4   # «Объекты»
-    header_row_3 = 5   # номера
-    header_row = header_row_3   # откуда начинаются данные
+    header_row_3 = 5   # номера 1..14
+    header_row = header_row_3
 
-    # Строка 3: заголовки столбцов
     row3_headers = [
-        "EUR",                                              # A
-        "Разница между выставленными счетами и фактическими коммунальными расходами с НДС с начала года",  # B
-        "Выставлено в сентябре (за август 2026) арендаторам",  # C
-        "в т.ч. НДС",                                       # D
-        "1.2.10.1 Мусор*",                                  # E
-        "1.2.10.2 Газ*",                                    # F
-        "1.2.10.3 Вода*",                                   # G
-        "1.2.10.4 Отопление*",                              # H
-        "1.2.10.5 Электричество*",                          # I
-        "1.2.10.6 Коммунальные УК дома*",                   # J
-        "Всего расходов на коммунальные услуги*",           # K
-        "Разница между выставленными счетами и фактическими коммунальными расходами за отчётный месяц (гр. 3 -гр.11)",  # L
-        "1.1.2.3 Компенсация по коммунальным расходам-Поступившая на счет",  # M
-        "Задолженность по возмещению КУ за отчётный месяц (гр.13 - гр.3)",  # N
+        "EUR",
+        "Разница между выставленными счетами и фактическими коммунальными расходами с НДС с начала года",
+        "Выставлено в сентябре (за август 2026) арендаторам",
+        "в т.ч. НДС",
+        "1.2.10.1 Мусор*",
+        "1.2.10.2 Газ*",
+        "1.2.10.3 Вода*",
+        "1.2.10.4 Отопление*",
+        "1.2.10.5 Электричество*",
+        "1.2.10.6 Коммунальные УК дома*",
+        "Всего расходов на коммунальные услуги*",
+        "Разница между выставленными счетами и фактическими коммунальными расходами за отчётный месяц (гр. 3 -гр.11)",
+        "1.1.2.3 Компенсация по коммунальным расходам-Поступившая на счет",
+        "Задолженность по возмещению КУ за отчётный месяц (гр.13 - гр.3)",
     ]
-
     for c, h in enumerate(row3_headers, start=1):
         cell = ws.cell(row=header_row_1, column=c, value=h)
         cell.fill = _HEADER_FILL
@@ -1905,7 +1936,6 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
             horizontal="center", vertical="center", wrap_text=True)
         cell.border = _CELL_BORDER
 
-    # Строка 4: «Объекты» в A, остальное пусто
     ws.cell(row=header_row_2, column=1, value="Объекты").fill = _HEADER_FILL
     ws.cell(row=header_row_2, column=1).font = _HEADER_FONT
     ws.cell(row=header_row_2, column=1).alignment = Alignment(
@@ -1916,193 +1946,158 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
         cell.fill = _HEADER_FILL
         cell.border = _CELL_BORDER
 
-    # Строка 5: номера столбцов 1..14
     for c in range(1, 15):
         cell = ws.cell(row=header_row_3, column=c, value=c)
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
-        cell.alignment = Alignment(
-            horizontal="center", vertical="center")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = _CELL_BORDER
 
-    # --- Читаем данные из файла КУ ---
+    # --- Открываем ОДДС ---
     if not ku_path or not os.path.exists(ku_path):
         print(f"[presentation_builder] не найден файл КУ: {ku_path}")
         return ws
 
     wb_ku = openpyxl.load_workbook(ku_path, data_only=True)
-    ws_ku = _find_ku_sheet(wb_ku, month_name)
+    ws_ku = wb_ku.active
 
-    # Ищем строку с заголовком «Объекты» — обычно это строка 5
-    data_start_row = None
-    for r in range(1, 10):
-        v = ws_ku.cell(row=r, column=1).value
-        if v and "объекты" in str(v).lower():
-            data_start_row = r + 1
-            break
-    if data_start_row is None:
-        data_start_row = 6
-
-    # Определяем столбцы в исходном файле
-    # A — объект
-    # C — Выставлено в [месяце] арендаторам (гр. 3)
-    # D — в т.ч. НДС
-    # E — 1.2.10.1 Мусор
-    # F — 1.2.10.2 Газ
-    # G — 1.2.10.3 Вода
-    # H — 1.2.10.4 Отопление
-    # I — 1.2.10.5 Электричество
-    # J — 1.2.10.6 Коммунальные УК дома
-    # K — Всего расходов
-    # L — Разница за отчётный месяц
-    # M — Компенсация поступившая
-    # N — Задолженность
-
-    # --- Режим для слайда 27: берём строку «Итого» из файла «с НДС»
-    #     и вычитаем из неё значения строки <subtract_object>. ---
-    if subtract_object:
-        # 1) Находим строку «Итого» в исходном файле.
-        total_src_row = None
-        for r in range(data_start_row, ws_ku.max_row + 1):
-            v = _clean(ws_ku.cell(row=r, column=1).value)
-            if v and v.lower() == "итого":
-                total_src_row = r
-                break
-
-        if total_src_row is None:
-            print(f"[presentation_builder] не найдена строка «Итого» "
-                  f"в файле КУ: {ku_path}")
-            return ws
-
-        # 2) Находим строку объекта, который надо вычесть
-        #    (по точному имени; если в файле имя с суффиксом — снимем его).
-        sub_src_row = None
-        for r in range(data_start_row, total_src_row):
-            raw_name = _clean(ws_ku.cell(row=r, column=1).value)
-            if not raw_name:
-                continue
-            if raw_name == subtract_object:
-                sub_src_row = r
-                break
-        if sub_src_row is None:
-            for r in range(data_start_row, total_src_row):
-                raw_name = _clean(ws_ku.cell(row=r, column=1).value)
-                if not raw_name:
-                    continue
-                if subtract_object.lower() in raw_name.lower():
-                    sub_src_row = r
-                    break
-
-        if sub_src_row is None:
-            print(f"[presentation_builder] не найдена строка "
-                  f"'{subtract_object}' в файле КУ: {ku_path}")
-            return ws
-
-        # 3) Записываем одну строку «Итого» = Итого(файл) − Объект(файл).
-        #    Столбцы 5..14 (E..N) — данные; столбцы 2..4 (B..D) — пустые.
-        total_row = header_row + 1
-        ws.cell(row=total_row, column=1,
-                value="Итого").font = Font(bold=True)
-        ws.cell(row=total_row, column=1).border = _CELL_BORDER
-
-        for c in range(2, 15):
-            v_total = _num(ws_ku, total_src_row, c)
-            v_sub   = _num(ws_ku, sub_src_row, c)
-            val = round(v_total - v_sub, 2)
-            cell = ws.cell(row=total_row, column=c, value=val)
-            cell.font = Font(bold=True)
-            cell.number_format = '#,##0'
-            cell.border = _CELL_BORDER
-
-        ws.column_dimensions["A"].width = 30
-        for c in range(2, 15):
-            ws.column_dimensions[get_column_letter(c)].width = 14
-
+    # --- Колонка месяца ---
+    month_col = _find_odds_month_col(ws_ku, month_name)
+    if month_col is None:
+        print(f"[presentation_builder] в файле {ku_path} "
+              f"не найдена колонка для месяца «{month_name}»")
         return ws
 
-    # --- Обычный режим: берём ТОЛЬКО объекты из config.KU_OBJECTS ---
-    # В файлах «ОДДС … с НДС.xlsx» / «… без НДС.xlsx» на листе идут
-    # подряд блоки: сначала таблица возмещения КУ (строки с объектами),
-    # потом блок ОДДС (Списания, 1.2.10 …). Нам нужны ТОЛЬКО строки,
-    # где в столбце A стоит имя объекта из списка config.KU_OBJECTS.
+    # --- Собираем данные из ОДДС ---
+    # Структура: смотрим строки level-1 (объекты) и их дочерние
+    # level-4 строки статей «1.2.10.N …».
+    #
+    # Возвращаем: {odd_name: {"musor": v, "gaz": v, "voda": v,
+    #                          "otopl": v, "elektr": v, "uk_doma": v}}
+    #
+    # Категорию определяем по тексту после «1.2.10.N»:
+    #   1.2.10.1 → Мусор
+    #   1.2.10.2 → Газ
+    #   1.2.10.3 → Вода
+    #   1.2.10.4 → Отопление
+    #   1.2.10.5 → Электричество
+    #   1.2.10.6 → Коммунальные УК дома
 
-    # Собираем индексы строк, где в столбце A — имя объекта
-    # из списка KU_OBJECTS. Сравниваем по «чистому» имени
-    # (без суффикса «[Latvia]» и т.п.).
-    object_rows = {}
-    for r in range(data_start_row, ws_ku.max_row + 1):
-        raw_name = _clean(ws_ku.cell(row=r, column=1).value)
-        if not raw_name:
+    def _category(t):
+        tl = t.lower()
+        if "1.2.10.1" in tl:
+            return "musor"
+        if "1.2.10.2" in tl:
+            return "gaz"
+        if "1.2.10.3" in tl:
+            return "voda"
+        if "1.2.10.4" in tl:
+            return "otopl"
+        if "1.2.10.5" in tl:
+            return "elektr"
+        if "1.2.10.6" in tl:
+            return "uk_doma"
+        return None
+
+    data_by_obj = {}
+    cur_obj = None
+    cur_obj_level = None
+
+    for r in range(1, ws_ku.max_row + 1):
+        raw = ws_ku.cell(row=r, column=1).value
+        if raw is None:
             continue
-        # Убираем суффикс вида «[Latvia]» — на всякий случай
-        clean_name = re.sub(r"\s*\[[^\]]*\]\s*$", "", raw_name).strip()
-        # Точное совпадение с одним из KU_OBJECTS
-        if clean_name in config.KU_OBJECTS:
-            # Если объект уже встречался — не перезаписываем
-            if clean_name not in object_rows:
-                object_rows[clean_name] = r
+        title = _clean(raw)
+        lvl = _level(raw)
 
-    # Теперь записываем строки в порядке KU_OBJECTS
+        # level 0 — новое направление (Latvia / East-Восток / …) — сбрасываем
+        if lvl == 0:
+            cur_obj = None
+            cur_obj_level = None
+            continue
+
+        # level 1 — объект
+        if lvl == 1:
+            cur_obj = title
+            cur_obj_level = lvl
+            if cur_obj not in data_by_obj:
+                data_by_obj[cur_obj] = {
+                    "musor": 0.0, "gaz": 0.0, "voda": 0.0,
+                    "otopl": 0.0, "elektr": 0.0, "uk_doma": 0.0,
+                }
+            continue
+
+        # внутри объекта — ищем статьи 1.2.10.N
+        if cur_obj is None:
+            continue
+        # встретили другой уровень ≤ cur_obj_level — объект закончился
+        if lvl <= cur_obj_level:
+            cur_obj = None
+            cur_obj_level = None
+            continue
+
+        # обрабатываем только строки статей 1.2.10.N
+        cat = _category(title)
+        if cat is None:
+            continue
+        # не суммируем «···· 1.2.10 Коммунальные платежи» (агрегат)
+        # — там нет «.N» в конце, но проверка _category это отсекает,
+        # потому что в агрегате нет «1.2.10.1…6»
+        val = _num(ws_ku, r, month_col)
+        data_by_obj[cur_obj][cat] += abs(val)
+
+    # --- Записываем строки в порядке KU_OBJECTS ---
     row_out = header_row + 1
     data_rows = []
-    for obj_name in config.KU_OBJECTS:
-        r = object_rows.get(obj_name)
-        if r is None:
-            # Объект не найден в файле — пишем пустую строку
-            ws.cell(row=row_out, column=1, value=obj_name).border = _CELL_BORDER
+
+    for ku_name in config.KU_OBJECTS:
+        odd_name = config.KU_TO_ODDS_NAME.get(ku_name, ku_name)
+
+        # если это объект, который надо вычесть — пропускаем
+        if subtract_object and ku_name == subtract_object:
+            continue
+
+        d = data_by_obj.get(odd_name)
+        if d is None:
+            # Объект не найден в ОДДС — пишем пустую строку
+            ws.cell(row=row_out, column=1, value=ku_name).border = _CELL_BORDER
             for c in range(2, 15):
                 ws.cell(row=row_out, column=c).border = _CELL_BORDER
             data_rows.append(row_out)
             row_out += 1
             continue
 
-        # Считываем значения из файла
-        val_musor   = _num(ws_ku, r, 5)   # E
-        val_gaz     = _num(ws_ku, r, 6)   # F
-        val_voda    = _num(ws_ku, r, 7)   # G
-        val_otopl   = _num(ws_ku, r, 8)   # H
-        val_elektr  = _num(ws_ku, r, 9)   # I
-        val_uk_doma = _num(ws_ku, r, 10)  # J
-        val_vsego   = _num(ws_ku, r, 11)  # K
-        val_komp    = _num(ws_ku, r, 13)  # M
+        ws.cell(row=row_out, column=1, value=ku_name).border = _CELL_BORDER
+        ws.cell(row=row_out, column=2).border = _CELL_BORDER
+        ws.cell(row=row_out, column=3).border = _CELL_BORDER
+        ws.cell(row=row_out, column=4).border = _CELL_BORDER
 
-        # Записываем в выходной лист
-        ws.cell(row=row_out, column=1, value=obj_name).border = _CELL_BORDER
+        ws.cell(row=row_out, column=5,
+                value=round(d["musor"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=6,
+                value=round(d["gaz"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=7,
+                value=round(d["voda"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=8,
+                value=round(d["otopl"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=9,
+                value=round(d["elektr"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=10,
+                value=round(d["uk_doma"], 2)).border = _CELL_BORDER
 
-        # Столбец B — Разница с начала года (из исходника столбец B)
-        ws.cell(row=row_out, column=2,
-                value=round(_num(ws_ku, r, 2), 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=2).number_format = '#,##0'
+        # K — Всего = сумма E:J (пишем формулу)
+        ws.cell(row=row_out, column=11,
+                value=f"=SUM(E{row_out}:J{row_out})").border = _CELL_BORDER
+        ws.cell(row=row_out, column=11).number_format = '#,##0'
 
-        # Столбец C — Выставлено в сентябре (из исходника C)
-        ws.cell(row=row_out, column=3,
-                value=round(_num(ws_ku, r, 3), 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=3).number_format = '#,##0'
+        # L, M, N — пусто
+        ws.cell(row=row_out, column=12).border = _CELL_BORDER
+        ws.cell(row=row_out, column=13).border = _CELL_BORDER
+        ws.cell(row=row_out, column=14).border = _CELL_BORDER
 
-        # Столбец D — в т.ч. НДС (из исходника D)
-        ws.cell(row=row_out, column=4,
-                value=round(_num(ws_ku, r, 4), 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=4).number_format = '#,##0'
-
-        ws.cell(row=row_out, column=5, value=round(val_musor, 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=6, value=round(val_gaz, 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=7, value=round(val_voda, 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=8, value=round(val_otopl, 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=9, value=round(val_elektr, 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=10, value=round(val_uk_doma, 2)).border = _CELL_BORDER
-        ws.cell(row=row_out, column=11, value=round(val_vsego, 2)).border = _CELL_BORDER
-
-        # Столбец 12 — разница за отчётный месяц (L из файла)
-        ws.cell(row=row_out, column=12,
-                value=round(_num(ws_ku, r, 12), 2)).border = _CELL_BORDER
-
-        # Столбец 13 — компенсация поступившая (M)
-        ws.cell(row=row_out, column=13,
-                value=round(val_komp, 2)).border = _CELL_BORDER
-
-        # Столбец 14 — задолженность (N)
-        ws.cell(row=row_out, column=14,
-                value=round(_num(ws_ku, r, 14), 2)).border = _CELL_BORDER
+        # формат чисел для E:J
+        for c in range(5, 11):
+            ws.cell(row=row_out, column=c).number_format = '#,##0'
 
         data_rows.append(row_out)
         row_out += 1
@@ -2114,11 +2109,10 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
     for c in range(2, 15):
         ws.cell(row=total_row, column=c).border = _CELL_BORDER
 
-    # Формулы для итогов: столбцы B..N
     if data_rows:
         first_data = data_rows[0]
         last_data = data_rows[-1]
-        for c in range(2, 15):  # столбцы B..N
+        for c in range(5, 12):  # столбцы E..K
             col_letter = get_column_letter(c)
             formula = f"=SUM({col_letter}{first_data}:{col_letter}{last_data})"
             cell = ws.cell(row=total_row, column=c, value=formula)
@@ -2126,7 +2120,7 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
             cell.number_format = '#,##0'
             cell.border = _CELL_BORDER
     else:
-        for c in range(2, 15):
+        for c in range(5, 12):
             ws.cell(row=total_row, column=c, value=0).border = _CELL_BORDER
 
     # --- Ширина колонок ---
