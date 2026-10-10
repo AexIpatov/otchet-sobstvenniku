@@ -1084,21 +1084,25 @@ def _collect_dds(odds_path, unit_name, months):
         return result
 
     # 3) Следующие две числовые строки — поступления и выбытия.
+    #
+    # В ОДДС у этих строк СТОЛБЕЦ A пустой (это агрегаты юнита),
+    # поэтому проверять наличие имени НЕ надо.
+    # Просто берём первые две строки с числами сразу после юнита.
     collected = 0
     for r in range(unit_row + 1, unit_row + 10):
         raw = ws.cell(row=r, column=1).value
 
-        # Если встретили следующий юнит (level 0) — стоп
+        # Если встретили ИМЕНОВАННУЮ строку с непустым A
+        # (например, «· AN14 …») — значит, агрегаты уже закончились.
         if raw is not None:
             title = _clean(raw)
-            lvl = _level(raw)
-            if lvl == 0 and title:
-                break
-            if lvl >= 1 and title:
+            if title:
+                # Непустое имя = начались объекты/статьи → стоп
                 break
 
         vals = {m: _num(ws, r, col) for m, col in month_col.items()}
-        if not any(vals.values()):
+        # Пропускаем полностью пустые строки
+        if not any(v != 0.0 for v in vals.values()):
             continue
 
         if collected == 0:
@@ -1115,8 +1119,6 @@ def _collect_dds(odds_path, unit_name, months):
             break
 
     return result
-
-
 
 def _parse_odds_balance(odds_path, unit_name, months):
     """
