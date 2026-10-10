@@ -1401,40 +1401,32 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
                                 data_plan, data_fact, months,
                                 plan_label, fact_label):
     """
-    Лист «Нарастающим итогом» — горизонтальная диаграмма с
-    накоплениями (stacked bar chart). План сверху, Факт снизу.
+    Лист «Нарастающим итогом» — горизонтальная stacked-диаграмма.
 
-    В PowerPoint на слайде 9:
-      • Легенда сверху — прямоугольники месяцев с подписями.
-      • Две горизонтальные полосы: План (сверху) и Факт (снизу).
-      • Внутри каждой полосы — цветные сегменты по месяцам,
-        ширина сегмента пропорциональна значению месяца.
-      • Внутри сегментов — числа.
-      • Справа — блок с итогами (План, Факт, %).
+    Как в PowerPoint:
+      • План сверху, Факт снизу.
+      • Каждая полоса = накопление по месяцам (январь слева, сентябрь справа).
+      • Числа внутри сегментов — значения за месяц.
+      • Справа — блок итогов (План, Факт, %).
+      • Ось X — от 0 слева до максимума справа.
     """
     ws = wb.create_sheet(sheet_title)
 
     # ---- 1. Данные для диаграммы ----
-    # Раскладка данных (чтобы диаграмма выглядела правильно):
-    #   Строка 1 — заголовок (мы его сдвинем ниже)
-    #   Строка 3 — шапка: "Показатель", Январь, Февраль, ... (заголовки серий)
-    #   Строка 4 — План: значения за каждый месяц
-    #   Строка 5 — Факт: значения за каждый месяц
+    # Строка 2 — шапка с названиями месяцев (заголовки серий).
+    # Строка 3 — План.
+    # Строка 4 — Факт.
     #
-    # ВАЖНО: для bar chart с horizontal orientation категории идут
-    # СНИЗУ ВВЕРХ. Поэтому План должен быть в СТРОКЕ 5 (нижней),
-    # чтобы он был СВЕРХУ на диаграмме.
-    #
-    # Но мы хотим, чтобы в таблице План был сверху (для читаемости).
-    # Поэтому:
-    #   строка 3 (шапка) — заголовки месяцев
-    #   строка 4 — План  (окажется СНИЗУ на диаграмме)
-    #   строка 5 — Факт  (окажется СВЕРХУ на диаграмме)
-    # и потом мы программно перевернём y_axis.scaling.orientation
-    # на "maxMin" (обратный порядок категорий).
-    header_row = 3
-    plan_row   = 4
-    fact_row   = 5
+    # ВНИМАНИЕ: chart.type="bar" с grouping="stacked"
+    # рисует СЕРИИ (столбцы) слева направо,
+    # а КАТЕГОРИИ (строки) — снизу вверх.
+    # Чтобы «План» был сверху, размещаем План в СТРОКЕ 3,
+    # Факт — в СТРОКЕ 4, и НЕ переворачиваем ось Y (по умолчанию
+    # Excel рисует первую категорию снизу — но со stacked bar
+    # это работает иначе; проверяем эмпирически).
+    header_row = 2
+    plan_row   = 3
+    fact_row   = 4
 
     ws.cell(row=header_row, column=1, value="Показатель").font = Font(bold=True)
     for i, m in enumerate(months, start=2):
@@ -1452,11 +1444,12 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
                      value=float(data_fact.get(m, 0.0) or 0.0))
         fc.number_format = '#,##0'
 
-    # ---- 2. Горизонтальная диаграмма с накоплениями ----
+    # ---- 2. Горизонтальная stacked-диаграмма ----
     chart = BarChart()
-    chart.type = "bar"           # горизонтальные полосы
-    chart.grouping = "stacked"   # накопление серий
-    chart.overlap = 100          # вплотную
+    chart.type = "bar"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 50
 
     data_ref = Reference(
         ws,
@@ -1468,31 +1461,23 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         min_col=1,
         min_row=plan_row, max_row=fact_row,
     )
-
     chart.add_data(data_ref, titles_from_data=True)
     chart.set_categories(cats_ref)
 
-    # Цвета серий — каждый месяц своим цветом
+    # Цвета серий — по месяцам
     for idx, series in enumerate(chart.series):
         if idx < len(months):
             m = months[idx]
             color = _MONTH_FILL.get(m, "808080")
             series.graphicalProperties.solidFill = color
             series.graphicalProperties.line.solidFill = "FFFFFF"
-            series.graphicalProperties.line.width = 10000  # тонкая белая рамка
+            series.graphicalProperties.line.width = 10000
 
-    # Переворачиваем ось категорий: чтобы План был СВЕРХУ, а Факт — СНИЗУ
-    # (по умолчанию Excel рисует снизу вверх).
-    chart.y_axis.scaling.orientation = "maxMin"
+    # Заголовок диаграммы НЕ добавляем — он уже есть над таблицей
+    chart.width = 32
+    chart.height = 12
 
-    chart.title = chart_title
-    chart.width = 32    # см
-    chart.height = 10   # см
-
-    chart.x_axis.delete = False
-    chart.y_axis.delete = False
-
-    # Числовые подписи — в центре сегмента
+    # Подписи внутри сегментов
     chart.dLbls = DataLabelList()
     chart.dLbls.showVal = True
     chart.dLbls.showSerName = False
@@ -1501,21 +1486,35 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     chart.dLbls.numFmt = '#,##0'
     chart.dLbls.position = "ctr"
 
-    # Легенда сверху — прямоугольники с месяцами
+    # Легенда сверху, по центру
     chart.legend.position = "t"
     chart.legend.overlay = False
 
+    # Ось X — обычное направление (0 слева, максимум справа)
+    chart.x_axis.scaling.orientation = "minMax"
+    chart.x_axis.delete = False
+
+    # Ось Y — обычное направление (первая категория снизу),
+    # но нам нужно План сверху. Excel для stacked bar
+    # рисует категории снизу вверх: первая категория в данных — внизу.
+    # Значит, чтобы «План» (строка 3) был СВЕРХУ, его надо разместить
+    # в СТРОКЕ 4, а Факт — в СТРОКЕ 3.
+    #
+    # ПРОСТОЙ СПОСОБ: переворачиваем ось Y через maxMin.
+    chart.y_axis.scaling.orientation = "maxMin"
+    chart.y_axis.delete = False
+
     ws.add_chart(chart, "A8")
 
-    # ---- 3. Блок итогов справа от диаграммы ----
+    # ---- 3. Блок итогов справа ----
     sum_plan = sum(float(data_plan.get(m, 0.0) or 0.0) for m in months)
     sum_fact = sum(float(data_fact.get(m, 0.0) or 0.0) for m in months)
     pct = (sum_fact / sum_plan) if sum_plan else 0.0
 
     box_col = max(13, len(months) + 5)
-    box_row = 3
+    box_row = 2
 
-    # Заголовок блока — тоже тёмно-синий
+    # Рамка блока — тёмно-синяя заливка
     for i in range(3):
         for j in range(2):
             cell = ws.cell(row=box_row + i, column=box_col + j)
@@ -1523,41 +1522,37 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
             cell.border = _CELL_BORDER
 
     # План
-    c_lab = ws.cell(row=box_row, column=box_col, value="План")
-    c_val = ws.cell(row=box_row, column=box_col + 1, value=round(sum_plan, 0))
-    for c in (c_lab, c_val):
-        c.font = Font(bold=True, color="FFC000", size=12)
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        c.fill = PatternFill("solid", fgColor="1F3864")
-        c.border = _CELL_BORDER
+    c_lab = ws.cell(row=box_row, column=box_col, value="")
+    c_val = ws.cell(row=box_row, column=box_col + 1,
+                    value=round(sum_plan, 0))
+    c_val.font = Font(bold=True, color="FFC000", size=14)
+    c_val.alignment = Alignment(horizontal="center", vertical="center")
     c_val.number_format = '#,##0'
 
     # Факт
-    c_lab = ws.cell(row=box_row + 1, column=box_col, value="Факт")
-    c_val = ws.cell(row=box_row + 1, column=box_col + 1, value=round(sum_fact, 0))
-    for c in (c_lab, c_val):
-        c.font = Font(bold=True, color="FFC000", size=12)
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        c.fill = PatternFill("solid", fgColor="1F3864")
-        c.border = _CELL_BORDER
+    c_val = ws.cell(row=box_row + 1, column=box_col + 1,
+                    value=round(sum_fact, 0))
+    c_val.font = Font(bold=True, color="FFC000", size=14)
+    c_val.alignment = Alignment(horizontal="center", vertical="center")
     c_val.number_format = '#,##0'
 
     # %
-    c_lab = ws.cell(row=box_row + 2, column=box_col, value="%")
-    c_val = ws.cell(row=box_row + 2, column=box_col + 1, value=round(pct, 4))
-    for c in (c_lab, c_val):
-        c.font = Font(bold=True, color="FFFFFF", size=12)
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        c.fill = PatternFill("solid", fgColor="1F3864")
-        c.border = _CELL_BORDER
+    c_val = ws.cell(row=box_row + 2, column=box_col + 1,
+                    value=round(pct, 4))
+    c_val.font = Font(bold=True, color="FFC000", size=14)
+    c_val.alignment = Alignment(horizontal="center", vertical="center")
     c_val.number_format = '0.0%'
 
     # Ширина колонок
     ws.column_dimensions["A"].width = 22
     for i in range(2, 2 + len(months)):
         ws.column_dimensions[get_column_letter(i)].width = 10
-    ws.column_dimensions[get_column_letter(box_col)].width = 10
+    ws.column_dimensions[get_column_letter(box_col)].width = 4
     ws.column_dimensions[get_column_letter(box_col + 1)].width = 14
+
+    # ---- 4. Скрыть служебные строки с данными ----
+    for r in (header_row, plan_row, fact_row):
+        ws.row_dimensions[r].hidden = True
 
     ws.sheet_view.showGridLines = False
     return ws
