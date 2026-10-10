@@ -1929,105 +1929,63 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
     # M — Компенсация поступившая
     # N — Задолженность
 
-    # --- Режим для слайда 27: список объектов без <subtract_object> ---
+    # --- Режим для слайда 27: берём строку «Итого» из файла «с НДС»
+    #     и вычитаем из неё значения строки <subtract_object>. ---
     if subtract_object:
-        # 1) Собираем индексы строк с объектами из KU_OBJECTS
-        object_rows = {}
+        # 1) Находим строку «Итого» в исходном файле.
+        total_src_row = None
         for r in range(data_start_row, ws_ku.max_row + 1):
+            v = _clean(ws_ku.cell(row=r, column=1).value)
+            if v and v.lower() == "итого":
+                total_src_row = r
+                break
+
+        if total_src_row is None:
+            print(f"[presentation_builder] не найдена строка «Итого» "
+                  f"в файле КУ: {ku_path}")
+            return ws
+
+        # 2) Находим строку объекта, который надо вычесть
+        #    (по точному имени; если в файле имя с суффиксом — снимем его).
+        sub_src_row = None
+        for r in range(data_start_row, total_src_row):
             raw_name = _clean(ws_ku.cell(row=r, column=1).value)
             if not raw_name:
                 continue
-            clean_name = re.sub(r"\s*\[[^\]]*\]\s*$", "", raw_name).strip()
-            if clean_name in config.KU_OBJECTS:
-                if clean_name not in object_rows:
-                    object_rows[clean_name] = r
+            if raw_name == subtract_object:
+                sub_src_row = r
+                break
+        if sub_src_row is None:
+            for r in range(data_start_row, total_src_row):
+                raw_name = _clean(ws_ku.cell(row=r, column=1).value)
+                if not raw_name:
+                    continue
+                if subtract_object.lower() in raw_name.lower():
+                    sub_src_row = r
+                    break
 
-        # 2) Собираем индексы строк, которые надо вычесть
-        #    (все объекты, в имени которых встречается subtract_object).
-        #    Например, subtract_object = "AC89 Чака" — вычитаем
-        #    строку «AC89 Чака 89 (дом + парковка)».
-        sub_rows = []
-        for obj_name, r in object_rows.items():
-            if subtract_object.lower() in obj_name.lower():
-                sub_rows.append(r)
+        if sub_src_row is None:
+            print(f"[presentation_builder] не найдена строка "
+                  f"'{subtract_object}' в файле КУ: {ku_path}")
+            return ws
 
-        # 3) Записываем строки: все KU_OBJECTS, кроме тех, что в sub_rows
-        row_out = header_row + 1
-        data_rows = []
-        for obj_name in config.KU_OBJECTS:
-            # Пропускаем объект, который надо вычесть
-            if subtract_object.lower() in obj_name.lower():
-                continue
-
-            r = object_rows.get(obj_name)
-            if r is None:
-                # Объект не найден — пустая строка
-                ws.cell(row=row_out, column=1,
-                        value=obj_name).border = _CELL_BORDER
-                for c in range(2, 15):
-                    ws.cell(row=row_out, column=c).border = _CELL_BORDER
-                data_rows.append(row_out)
-                row_out += 1
-                continue
-
-            # Значения объекта
-            val_musor   = _num(ws_ku, r, 5)
-            val_gaz     = _num(ws_ku, r, 6)
-            val_voda    = _num(ws_ku, r, 7)
-            val_otopl   = _num(ws_ku, r, 8)
-            val_elektr  = _num(ws_ku, r, 9)
-            val_uk_doma = _num(ws_ku, r, 10)
-            val_vsego   = _num(ws_ku, r, 11)
-            val_komp    = _num(ws_ku, r, 13)
-
-            ws.cell(row=row_out, column=1,
-                    value=obj_name).border = _CELL_BORDER
-            ws.cell(row=row_out, column=2).border = _CELL_BORDER
-            ws.cell(row=row_out, column=3).border = _CELL_BORDER
-            ws.cell(row=row_out, column=4).border = _CELL_BORDER
-
-            ws.cell(row=row_out, column=5,
-                    value=round(val_musor, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=6,
-                    value=round(val_gaz, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=7,
-                    value=round(val_voda, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=8,
-                    value=round(val_otopl, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=9,
-                    value=round(val_elektr, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=10,
-                    value=round(val_uk_doma, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=11,
-                    value=round(val_vsego, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=12,
-                    value=round(_num(ws_ku, r, 12), 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=13,
-                    value=round(val_komp, 2)).border = _CELL_BORDER
-            ws.cell(row=row_out, column=14,
-                    value=round(_num(ws_ku, r, 14), 2)).border = _CELL_BORDER
-
-            data_rows.append(row_out)
-            row_out += 1
-
-        # 4) Строка «Итого» — сумма всех записанных строк
-        total_row = row_out
+        # 3) Записываем одну строку «Итого» = Итого(файл) − Объект(файл).
+        #    Столбцы 5..14 (E..N) — данные; столбцы 2..4 (B..D) — пустые.
+        total_row = header_row + 1
         ws.cell(row=total_row, column=1,
                 value="Итого").font = Font(bold=True)
         ws.cell(row=total_row, column=1).border = _CELL_BORDER
-        for c in range(2, 15):
+        for c in range(2, 5):
             ws.cell(row=total_row, column=c).border = _CELL_BORDER
 
-        if data_rows:
-            first_data = data_rows[0]
-            last_data = data_rows[-1]
-            for c in range(5, 15):
-                col_letter = get_column_letter(c)
-                formula = f"=SUM({col_letter}{first_data}:{col_letter}{last_data})"
-                cell = ws.cell(row=total_row, column=c, value=formula)
-                cell.font = Font(bold=True)
-                cell.number_format = '#,##0'
-                cell.border = _CELL_BORDER
+        for c in range(5, 15):
+            v_total = _num(ws_ku, total_src_row, c)
+            v_sub   = _num(ws_ku, sub_src_row, c)
+            val = round(v_total - v_sub, 2)
+            cell = ws.cell(row=total_row, column=c, value=val)
+            cell.font = Font(bold=True)
+            cell.number_format = '#,##0'
+            cell.border = _CELL_BORDER
 
         ws.column_dimensions["A"].width = 30
         for c in range(2, 15):
@@ -2893,7 +2851,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 "Антонияс": 11,
                 "Чака":     16,
                 "Матиса":   33,
-                "Эспорта":  29,
+                "Эспорта":  0,   # слайд 29 занят таблицей КУ без НДС
             }
             ebitda_color_map = {
                 "Антонияс": _COLOR_LINE_RED,
