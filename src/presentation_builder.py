@@ -469,16 +469,36 @@ def _parse_debts(debts_path, months):
           f"строк: {ws.max_row}, колонок: {ws.max_column}")
 
     # --- 1. Ищем шапку «Объект» ---
+    # В файле есть строка 1 «Долги по объектам аренды» — она тоже
+    # содержит слово «объект». Поэтому ищем не «объект» где угодно,
+    # а именно ячейку A, в которой написано ровно «Объект»
+    # (без других слов), И при этом в B..M есть даты.
     header_row = None
     for r in range(1, min(30, ws.max_row + 1)):
         v = ws.cell(row=r, column=1).value
-        if v and "объект" in str(v).lower():
+        if not v:
+            continue
+        sv = str(v).strip().lower()
+        if sv != "объект":
+            continue
+        # Проверяем, что в этой же строке в B..M есть даты
+        has_dates = any(
+            isinstance(ws.cell(row=r, column=c).value,
+                       (_dt.datetime, _dt.date))
+            for c in range(2, min(ws.max_column, 25) + 1)
+        )
+        if has_dates:
             header_row = r
             break
+
     if header_row is None:
-        print("[_parse_debts] не найдена шапка «Объект»")
+        print("[_parse_debts] не найдена шапка «Объект» с датами")
+        # Диагностика — печатаем первые 5 ячеек столбца A
+        for rr in range(1, min(6, ws.max_row + 1)):
+            print(f"[_parse_debts]   A{rr} = "
+                  f"{ws.cell(row=rr, column=1).value!r}")
         return result
-    print(f"[_parse_debts] шапка «Объект» — строка {header_row}")
+    print(f"[_parse_debts] шапка «Объект» с датами — строка {header_row}")
 
     # --- 2. Собираем {month: col} из дат в шапке ---
     month_col = {}
