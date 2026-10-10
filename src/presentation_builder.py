@@ -3113,19 +3113,30 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # Слайд 29 — «Возмещение Коммунальных услуг без НДС по всем»
     month_name_ru = _MONTHS_RU_LOWER.get(month, "сентябрь").capitalize()
 
+    # Ищем файлы КУ в папке TEMP_KU_DIR.
+    # Пользователь загружает два файла ОДДС:
+    #   - «ОДДС 01.01.2026-30.09.2026 с НДС.xlsx»
+    #   - «ОДДС 01.01.2026-30.09.2026 без НДС.xlsx»
+    # Слайд 27 строится из файла «с НДС» с вычитанием Чака.
+    ku_with_vat = config.find_ku_file_with_vat()
+    ku_without_vat = config.find_ku_file_without_vat()
+
+    print(f"[presentation_builder] Файл КУ с НДС:    {ku_with_vat}")
+    print(f"[presentation_builder] Файл КУ без НДС:  {ku_without_vat}")
+
     ku_specs = [
         (25, "Возмещение_КУ_с_НДС",
          "Возмещение Коммунальных услуг с НДС",
          f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года с НДС, EUR",
-         ku_files_found["with_vat_all"], None),
+         ku_with_vat, None),
         (27, "Возмещение_КУ_с_НДС_кроме_Чака",
          "Возмещение Коммунальных услуг с НДС кроме Чака 89",
          f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года (с НДС кроме Чака 89), EUR",
-         ku_files_found["with_vat_all"], "AC89 Чака"),
+         ku_with_vat, "AC89 Чака"),
         (29, "Возмещение_КУ_без_НДС",
          "Возмещение Коммунальных услуг без НДС по всем",
          f"Информация о возмещении коммунальных услуг за {month_name_ru} {year} года без НДС по всем, EUR",
-         ku_files_found["without_vat_all"], None),
+         ku_without_vat, None),
     ]
 
     for slide_no, base_name, chart_title, subtitle, ku_path, subtract_object in ku_specs:

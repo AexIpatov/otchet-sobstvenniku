@@ -906,10 +906,40 @@ TEMPLATE_ROW_MAP = {
 # 16. ФАЙЛЫ ВОЗМЕЩЕНИЯ КОММУНАЛЬНЫХ УСЛУГ (КУ)
 # ============================================================
 # Используются для слайдов 25, 27, 29 презентации.
-# Пользователь загружает эти файлы через app.py.
-# Имена файлов должны точно совпадать с теми, что ожидает
-# presentation_builder.py.
-KU_FILE_WITH_VAT_ALL        = TEMP_KU_DIR / "Возмещение КУ с НДС.xlsx"
-KU_FILE_WITH_VAT_NO_CHAKA   = TEMP_KU_DIR / "Возмещение КУ с НДС кроме Чака 89.xlsx"
-KU_FILE_WITHOUT_VAT_ALL     = TEMP_KU_DIR / "Возмещение КУ без НДС по всем.xlsx"
+# Пользователь загружает ДВА файла:
+#   - «ОДДС 01.01.2026-30.09.2026 с НДС.xlsx»
+#   - «ОДДС 01.01.2026-30.09.2026 без НДС.xlsx»
+# Слайд 27 («с НДС кроме Чака 89») формируется программно
+# из файла «с НДС» — из строки «Итого» вычитается строка «AC89 Чака».
+#
+# Имена файлов содержат диапазон дат, который меняется каждый месяц.
+# Поэтому используем маски (glob) — ищем по ключевым словам.
+def find_ku_file_with_vat():
+    """Ищет в TEMP_KU_DIR файл «... с НДС.xlsx» (но не «без НДС» и не «кроме Чака»)."""
+    if not TEMP_KU_DIR.exists():
+        return None
+    candidates = []
+    for f in TEMP_KU_DIR.glob("*.xlsx"):
+        if f.name.startswith("~$"):
+            continue
+        n = f.name.lower()
+        if "без ндс" in n:
+            continue
+        if "кроме чака" in n:
+            continue
+        if "с ндс" in n:
+            candidates.append(f)
+    return candidates[0] if candidates else None
+
+
+def find_ku_file_without_vat():
+    """Ищет в TEMP_KU_DIR файл «... без НДС.xlsx»."""
+    if not TEMP_KU_DIR.exists():
+        return None
+    for f in TEMP_KU_DIR.glob("*.xlsx"):
+        if f.name.startswith("~$"):
+            continue
+        if "без ндс" in f.name.lower():
+            return f
+    return None
 
