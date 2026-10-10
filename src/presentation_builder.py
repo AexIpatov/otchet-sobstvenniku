@@ -369,41 +369,70 @@ def _collect_unit_expenses(rows, unit_name, months):
 
     return result
 
-def _parse_investments(ref_path, unit_name, months):
+def _parse_investments_all(ref_path):
     """
-    Читает справочник «Вложенные средства на объекты.xlsx».
-    Возвращает {month: value} — сумму вложений по юниту (если по месяцам),
-    либо усреднённое значение.
+    Читает файл «Вложенные средства на объекты.xlsx» и возвращает
+    {имя_объекта: сумма_вложений}.
 
-    Если структура файла другая — нужно адаптировать.
+    Структура файла:
+      Строка 1: «Вложенные средства на объекты»
+      Строка 2: «Наименование объекта» | «Сумма ...»
+      Далее: строки с объектами и суммами.
+      Встречаются заголовки секций без чисел: «Estate LV», «Estate East:», «Estate EU».
+      Также встречаются формулы типа «=SUM(...)» в столбце B — их игнорируем.
+
+    Имена объектов включают суффикс типа «[Latvia]», «[East-Восток]», «[Europe]» —
+    сохраняем их как есть.
     """
-    result = {m: 0.0 for m in months}
+    result = {}
     if not ref_path or not os.path.exists(ref_path):
         return result
 
     wb = openpyxl.load_workbook(ref_path, data_only=True)
     ws = wb.active
 
-    # Ищем строку с названием юнита и столбцы с месяцами.
-    header_row = None
-    for r in range(1, 6):
-        v = ws.cell(row=r, column=1).value
-        if v and "объект" in str(v).lower():
-            header_row = r
-            break
-    if header_row is None:
-        header_row = 1
-
-    month_col = _find_month_columns(ws, header_row, months)
-
-    for r in range(header_row + 1, ws.max_row + 1):
+    for r in range(1, ws.max_row + 1):
         name = _clean(ws.cell(row=r, column=1).value)
-        if name == unit_name:
-            for m, col in month_col.items():
-                result[m] = _num(ws, r, col)
-            return result
+        if not name:
+            continue
+
+        # Пропускаем заголовок
+        if "наименование" in name.lower():
+            continue
+
+        # Читаем сумму из столбца B
+        v = ws.cell(row=r, column=2).value
+
+        # Если это формула (строка начинается с «=»), при data_only=True
+        # она уже вычислена. Но если формула не вычислена — value будет «=SUM(...)» —
+        # тогда пропускаем строку.
+        if isinstance(v, str) and v.startswith("="):
+            continue
+
+        amount = _num(ws, r, 2)
+
+        # Пустые суммы (None) — это заголовки секций, пропускаем
+        if amount == 0.0 and v in (None, "", 0):
+            # Но если в явном виде 0 (UK_Latvia, ML2, UK_EU) — сохраняем
+            if v == 0:
+                result[name] = 0.0
+            continue
+
+        result[name] = float(amount)
 
     return result
+
+
+def _sum_investments(investments_all, object_names):
+    """
+    Возвращает сумму вложений по списку объектов.
+    object_names — список имён объектов (например,
+      ["AN14 Антониас 14 (дом + парковка) [Latvia]"]).
+    """
+    total = 0.0
+    for name in object_names:
+        total += investments_all.get(name, 0.0)
+    return total
 
 def _parse_debts(debts_path, months):
     """
@@ -2183,13 +2212,16 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         1: 0.316, 2: 0.316, 3: 0.290, 4: 0.303, 5: 0.327,
         6: 0.299, 7: 0.291, 8: 0.297, 9: 0.310,
     }
+    _fot_share_etalon = {
+        1: 0.316, 2: 0.316, 3: 0.290, 4: 0.303, 5: 0.327,
+        6: 0.299, 7: 0.291, 8: 0.297, 9: 0.310,
+    }
     series_66 = [
         {
             "name": "Доля производственного ФОТ",
             "color": "C00000",
             "values": {m: _fot_share_etalon.get(m, 0.0) for m in months},
         },
-        {
             "name": "Доля административного ФОТ",
             "color": "70AD47",
             "values": {m: 0.0 for m in months},
@@ -2209,15 +2241,12 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         months=months,
     )
 
-    # ---- Слайд 67. EBITDA margin общий (1 линия) ----
-    # Для EBITDA margin общего исключаем UK Estate —
-    # у него нет выручки, и он искажает консолидацию.
-    # EBITDA margin Estate = ЧП Estate консолид. / Выручка Estate консолид.
-    # (Latvia + East-Восток + Europe, БЕЗ UK Estate, Unelma, Nomiqa).
-    # Совпадает с PPTX (5,3%, 3,5%, 14,5%, ...).
+    # ---- Слайд 67. Рентабельность по ЧП (общая по всем юнитам) ----
+    # = ЧП всего / Выручка всего (строка «Рентабельность по ЧП» в ОПиУ, level 0).
+    # Включает ВСЕ юниты: Latvia + East-Восток + Europe + Nomiqa + Unelma + UK Estate.
     ebitda_net_est = {m: 0.0 for m in months}
     ebitda_rev_est = {m: 0.0 for m in months}
-    for u in ("Latvia", "East-Восток", "Europe"):
+    for u in _UNITS:                    # ← ВСЕ юниты
         if u in unit_net:
             for m in months:
                 ebitda_net_est[m] += unit_net[u].get(m, 0.0) or 0.0
@@ -2293,32 +2322,120 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         )
 
     # ---- Слайд 70. ROI по юнитам (5 линий) ----
-    # ROI = ЧП / Вложенные средства
-    # Вложенные средства — из data/input/Справочники/Вложенные средства на объекты.xlsx
+    # ROI = ЧП / Вложенные средства (за период).
+    #
+    # Вложенные средства — фиксированная величина на объект (не по месяцам).
+    # Поэтому ROI считается как (ЧП_за_месяц × число_месяцев) / вложения?
+    # Нет: в PPTX ROI — это ЧП за месяц / вложения × 100%.
+    # Тогда январь: 20 558 / 1 286 000 = 1,6% (для Estate целиком).
+    #
+    # Формула в PPTX (слайд 70): ROI = ЧП (за период) / вложения.
+    # Но так как вложения — постоянная величина, а ЧП — помесячная,
+    # считаем ROI_месяц = ЧП_месяц / вложения. В PPTX отображается
+    # кумулятивно нарастающим итогом по месяцам? Смотрим на график —
+    # там 5% в янв, 1,5% в фев... Значит это не накопление,
+    # а просто месячный ROI.
+
+    investments_all = _parse_investments_all(config.REF_INVESTMENTS_FILE)
+
+    # Группы объектов и соответствие «группа → источник ЧП»
     roi_groups = [
-        ("Антонияс",     "AN14 Антониас 14 (дом + парковка)", "70AD47"),
-        ("Чака",         "AC89 Чака 89 (дом + парковка)",     "C00000"),
-        ("Коммерческие", "Коммерческие помещения LV",         "FFC000"),
-        ("Азербайджан",  "East-Восток",                       "548235"),
-        ("Европа",       "Europe",                            "ED7D31"),
+        (
+            "Антонияс",
+            ["AN14 Антониас 14 (дом + парковка) [Latvia]"],
+            "obj", "AN14 Антониас 14 (дом + парковка)",
+            "70AD47",
+        ),
+        (
+            "Чака",
+            ["AC89 Чака 89 (дом + парковка) [Latvia]"],
+            "obj", "AC89 Чака 89 (дом + парковка)",
+            "C00000",
+        ),
+        (
+            "Коммерческие",
+            [
+                "D4 Парковка-Deglava4 [Latvia]",
+                "AC87 Гараж Чака [Latvia]",
+                "B117 Бривибас, 117 [Latvia]",
+                "B78 Бривибас, 78 [Latvia]",
+                "C23 Цесу, 23 [Latvia]",
+                "DAR1_Darzauglu1 [Latvia]",
+                "DS1 Дзирнаву, 1 [Latvia]",
+                "G73 Гертрудес, 73 [Latvia]",
+                "H5 Хоспиталю [Latvia]",
+                "MP1_Marupe [Latvia]",
+                "OZ1 Озолниеки [Latvia]",
+                "V22 К. Валдемара 22 [Latvia]",
+                "UK_Latvia [Latvia]",
+            ],
+            "virtual", "Коммерческие помещения LV",
+            "FFC000",
+        ),
+        (
+            "Азербайджан",
+            [
+                "AL0 - AL0 Aliyarbekova0etaj [East-Восток]",
+                "AL1 - AL1 Aliyarbekova1etaj [East-Восток]",
+                "AL2 - AL2 Aliyarbekova2etaj [East-Восток]",
+                "AL3 - AL3 Aliyarbekova3etaj [East-Восток]",
+                "EG_Egoist [East-Восток]",
+                "UKA - UK_AZ-Аренда [East-Восток]",
+                "VD_Vidadi [East-Восток]",
+                "BIS - Baku, Icheri Sheher 1,2 [East-Восток]",
+            ],
+            "unit", "East-Восток",
+            "548235",
+        ),
+        (
+            "Европа",
+            [
+                "DZ1_Dzibik1 [Europe]",
+                "F6 Помещение в доме Будапешт [Europe]",
+                "J91 Ялтская - Помещение маленькое [Europe]",
+                "ML2 [Europe]",
+                "OT1_Otovice Участок Свалка [Europe]",
+                "TGM20-Masaryka20 [Europe]",
+                "TGM45 Масарика - Bagel Lounge [Europe]",
+                "UK_EU [Europe]",
+            ],
+            "unit", "Europe",
+            "ED7D31",
+        ),
     ]
 
     series_70 = []
-    for roi_name, src_name, color in roi_groups:
-        investments = _parse_investments(
-            config.REF_INVESTMENTS_FILE, src_name, months
-        )
-        if src_name in units:
-            net = units[src_name]["net"]
-        elif "Latvia" in units and src_name in units["Latvia"]["objects"]:
-            net = units["Latvia"]["objects"][src_name]["net"]
+    for roi_name, inv_objects, net_source, net_key, color in roi_groups:
+        # Сумма вложений по группе
+        inv_total = _sum_investments(investments_all, inv_objects)
+
+        # ЧП группы (помесячно)
+        if net_source == "obj":
+            # Объект внутри Latvia
+            if "Latvia" in units and net_key in units["Latvia"]["objects"]:
+                net = units["Latvia"]["objects"][net_key]["net"]
+            else:
+                net = {m: 0.0 for m in months}
+        elif net_source == "virtual":
+            # Виртуальный объект «Коммерческие помещения LV»
+            if "Latvia" in units and net_key in units["Latvia"]["objects"]:
+                net = units["Latvia"]["objects"][net_key]["net"]
+            else:
+                net = {m: 0.0 for m in months}
+        elif net_source == "unit":
+            # Юнит целиком
+            if net_key in units:
+                net = units[net_key]["net"]
+            else:
+                net = {m: 0.0 for m in months}
         else:
             net = {m: 0.0 for m in months}
 
+        # ROI = ЧП / вложения (за месяц)
         roi_vals = {}
         for m in months:
-            inv = investments.get(m, 0.0)
-            n = net.get(m, 0.0)
+            inv = inv_total
+            n = net.get(m, 0.0) or 0.0
             roi_vals[m] = (n / inv) if inv else 0.0
 
         series_70.append({
@@ -2879,9 +2996,8 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         )
 
         # Слайд 62 — Доля расходов УК R1 в операционной выручке Estate
-        # Расходы УК = |все расходы UK Estate| (Произв. + Косв. + Комм.)
-        # Операционная выручка = полная выручка Estate (Latvia + Europe + East-Восток)
         uk_expenses = _collect_unit_expenses(rows, "UK Estate", months)
+        print(f"[UK expenses] {uk_expenses}")
 
         # Полная выручка Estate = сумма трёх юнитов
         estate_rev_full = {m: 0.0 for m in months}
