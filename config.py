@@ -915,10 +915,25 @@ TEMPLATE_ROW_MAP = {
 # Имена файлов содержат диапазон дат, который меняется каждый месяц.
 # Поэтому используем маски (glob) — ищем по ключевым словам.
 def find_ku_file_with_vat():
-    """Ищет в TEMP_KU_DIR файл «... с НДС.xlsx» (но не «без НДС» и не «кроме Чака»)."""
+    """
+    Ищет в TEMP_KU_DIR файл «Возмещение КУ … с НДС.xlsx».
+
+    Приоритет:
+      1) файл, в имени которого есть «возмещение» и «с ндс»,
+         и НЕТ «без ндс» и «кроме чака»;
+      2) любой файл «… с НДС.xlsx», НЕ начинающийся с «ОДДС»;
+      3) любой файл «… с НДС.xlsx».
+
+    ОДДС-файлы («ОДДС … с НДС.xlsx») игнорируются — у них
+    другая структура (строки-объекты с префиксами ·, столбцы-месяцы).
+    """
     if not TEMP_KU_DIR.exists():
         return None
-    candidates = []
+
+    ku_candidates = []       # «Возмещение КУ … с НДС»
+    non_odds = []            # «… с НДС», но не ОДДС
+    any_s_vat = []           # любой «… с НДС»
+
     for f in TEMP_KU_DIR.glob("*.xlsx"):
         if f.name.startswith("~$"):
             continue
@@ -927,9 +942,58 @@ def find_ku_file_with_vat():
             continue
         if "кроме чака" in n:
             continue
-        if "с ндс" in n:
-            candidates.append(f)
-    return candidates[0] if candidates else None
+        if "с ндс" not in n:
+            continue
+
+        any_s_vat.append(f)
+
+        if "возмещение" in n:
+            ku_candidates.append(f)
+        elif not n.startswith("оддс"):
+            non_odds.append(f)
+
+    if ku_candidates:
+        return ku_candidates[0]
+    if non_odds:
+        return non_odds[0]
+    return any_s_vat[0] if any_s_vat else None
+
+
+def find_ku_file_without_vat():
+    """
+    Ищет в TEMP_KU_DIR файл «Возмещение КУ … без НДС.xlsx».
+
+    Приоритет:
+      1) файл с «возмещение» и «без ндс»;
+      2) любой файл «… без НДС», НЕ начинающийся с «ОДДС»;
+      3) любой файл «… без НДС».
+    """
+    if not TEMP_KU_DIR.exists():
+        return None
+
+    ku_candidates = []
+    non_odds = []
+    any_without = []
+
+    for f in TEMP_KU_DIR.glob("*.xlsx"):
+        if f.name.startswith("~$"):
+            continue
+        n = f.name.lower()
+        if "без ндс" not in n:
+            continue
+
+        any_without.append(f)
+
+        if "возмещение" in n:
+            ku_candidates.append(f)
+        elif not n.startswith("оддс"):
+            non_odds.append(f)
+
+    if ku_candidates:
+        return ku_candidates[0]
+    if non_odds:
+        return non_odds[0]
+    return any_without[0] if any_without else None
 
 
 def find_ku_file_without_vat():
