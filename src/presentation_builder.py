@@ -1777,26 +1777,61 @@ def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
 # ------------------------------------------------------------
 def _find_ku_sheet(wb_ku, month_name):
     """
-    Ищет в книге лист, на котором есть таблица возмещения КУ.
-    Признак: в столбце A есть ячейка «Объекты», а ниже — «AC89 Чака».
+    Ищет в книге лист, на котором есть таблица возмещения КУ
+    (а не блок ОДДС).
+
+    Признак таблицы КУ:
+      • в столбце A есть ячейка «Объекты»,
+      • ниже есть строка «Итого»,
+      • в первой строке данных столбец E (Мусор) содержит
+        ПОЛОЖИТЕЛЬНОЕ число (в ОДДС там отрицательные — списания).
 
     Сначала пробует лист с именем month_name (например, «Сентябрь»).
     Если его нет — перебирает все листы.
     """
+    def _looks_like_ku(ws):
+        header_row = None
+        for r in range(1, 15):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "объекты" in v.lower():
+                header_row = r
+                break
+        if header_row is None:
+            return False
+        # Проверяем: есть ли ниже «Итого» и положительное ли E у первой строки данных
+        has_total = False
+        for r in range(header_row + 1, min(header_row + 30, ws.max_row + 1)):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "итого" in v.lower():
+                has_total = True
+                break
+        if not has_total:
+            return False
+        # Первая строка данных
+        first_data = header_row + 1
+        e_val = _num(ws, first_data, 5)
+        if e_val <= 0:
+            # Возможно, объект с нулём в E — попробуем следующую строку
+            for r in range(first_data, min(first_data + 5, ws.max_row + 1)):
+                e_val = _num(ws, r, 5)
+                if e_val > 0:
+                    return True
+            return False
+        return True
+
     # 1) Пробуем по имени
     if month_name in wb_ku.sheetnames:
         ws = wb_ku[month_name]
-        for r in range(1, 15):
-            v = _clean(ws.cell(row=r, column=1).value)
-            if v and "объекты" in v.lower():
-                return ws
+        if _looks_like_ku(ws):
+            return ws
     # 2) Перебираем все листы
     for ws in wb_ku.worksheets:
-        for r in range(1, 15):
-            v = _clean(ws.cell(row=r, column=1).value)
-            if v and "объекты" in v.lower():
-                return ws
-    # 3) Fallback — активный лист
+        if _looks_like_ku(ws):
+            return ws
+    # 3) Fallback — по имени, если есть
+    if month_name in wb_ku.sheetnames:
+        return wb_ku[month_name]
+    # 4) Fallback — активный лист
     return wb_ku.active
 
 def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
@@ -1893,6 +1928,7 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
     # --- Режим «Итого минус объект» (для слайда 27) ---
     if subtract_object:
         # Ищем первое «Итого» — это конец таблицы возмещения КУ
+        # Ищем первое «Итого» — это конец таблицы возмещения КУ
         total_row_src = None
         for r in range(data_start_row, ws_ku.max_row + 1):
             obj_name = _clean(ws_ku.cell(row=r, column=1).value)
@@ -1936,8 +1972,8 @@ def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
         return ws
 
     # --- Обычный режим: перебираем все объекты ---
-    # ВАЖНО: в файлах «ОДДС … с НДС.xlsx» / «… без НДС.xlsx»
-    # таблица возмещения КУ идёт первой и заканчивается строкой «Итого».
+    # В файлах «ОДДС … с НДС.xlsx» / «… без НДС.xlsx» таблица возмещения КУ
+    # идёт ПЕРВОЙ и заканчивается строкой «Итого».
     # Ниже начинается уже другой блок (Списания, Сальдо, Чистый денежный поток).
     # Поэтому как только встретили ПЕРВОЕ «Итого» — останавливаемся.
     row_out = header_row + 1
