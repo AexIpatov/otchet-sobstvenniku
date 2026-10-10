@@ -786,7 +786,292 @@ def _sheet_dds(wb, sheet_title, chart_title, subtitle,
 
     ws.add_chart(chart, "E4")
 
+# ------------------------------------------------------------
+# Лист: «Выручка по юнитам» (слайд 65) — 4 линии
+# ------------------------------------------------------------
+def _sheet_revenue_by_units(wb, sheet_title, chart_title, subtitle,
+                            series_data, months):
+    """
+    series_data — список словарей:
+      [{"name": "Latvia", "color": "4472C4", "values": {m: v}},
+       {"name": "East-Восток", "color": "C00000", "values": {m: v}}, ...]
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
 
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+# ------------------------------------------------------------
+# Лист: «EBITDA margin юнитов» (слайд 69) — 3 линии
+# ------------------------------------------------------------
+def _sheet_ebitda_units(wb, sheet_title, chart_title, subtitle,
+                        series_data, months):
+    """
+    series_data — список: [{"name": ..., "color": ..., "values": {m: v}}]
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+# ------------------------------------------------------------
+# Лист: «Доля ФОТ в полной выручке» (слайд 66) — 3 линии
+# ------------------------------------------------------------
+def _sheet_fot_share_full(wb, sheet_title, chart_title, subtitle,
+                          series_data, months):
+    """
+    series_data — список: [{"name": ..., "color": ..., "values": {m: v}}]
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+# ------------------------------------------------------------
+# Лист: «EBITDA margin общий» (слайд 67) — 1 линия
+# ------------------------------------------------------------
+def _sheet_ebitda_common(wb, sheet_title, chart_title, subtitle,
+                         data_values, months):
+    """data_values = {month: margin}"""
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "EBITDA margin"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_values.get(m, 0.0) or 0.0, 4),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=2,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    chart.series[0].graphicalProperties.line.solidFill = "70AD47"
+    chart.series[0].graphicalProperties.line.width = 25000
+    chart.series[0].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend = None
+    ws.add_chart(chart, "H4")
+
+
+# ------------------------------------------------------------
+# Лист: «Динамика валовой прибыли» (слайд 68) — stacked bar, 3 серии
+# ------------------------------------------------------------
+def _sheet_profit_dynamics(wb, sheet_title, chart_title, subtitle,
+                           series_data, months):
+    """
+    series_data — список: [{"name": ..., "color": ..., "values": {m: v}}]
+    Серии складываются друг на друга (stacked).
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.solidFill = "FFFFFF"
+            chart.series[idx].graphicalProperties.line.width = 10000
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "ctr"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
 
 # ============================================================
 # ГЛАВНАЯ ФУНКЦИЯ
@@ -1389,6 +1674,169 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                     )
 
     # --------------------------------------------------------
+    # 1a. Аналитические слайды по всем юнитам (65–69)
+    # --------------------------------------------------------
+    # Собираем выручку, ЧП и ФОТ по каждому юниту из units.
+    unit_rev = {u: units[u]["revenue"] for u in _UNITS if u in units}
+    unit_net = {u: units[u]["net"]     for u in _UNITS if u in units}
+    unit_fot = {u: units[u]["fot"]     for u in _UNITS if u in units}
+
+    # ---- Слайд 65. Выручка по юнитам (4 линии) ----
+    series_65 = []
+    colors_65 = {
+        "Latvia":      "4472C4",   # синий
+        "East-Восток": "C00000",   # красный
+        "Europe":      "7030A0",   # фиолетовый
+        "UK Estate":   "00B050",   # зелёный
+    }
+    for u in ("Latvia", "East-Восток", "Europe", "UK Estate"):
+        if u in unit_rev:
+            series_65.append({
+                "name": u,
+                "color": colors_65.get(u, "808080"),
+                "values": unit_rev[u],
+            })
+    if series_65:
+        _sheet_revenue_by_units(
+            wb,
+            sheet_title=_sheet_name_with_slide(65, "Выручка_по_юнитам"),
+            chart_title="Выручка по юнитам",
+            subtitle="Выручка по юнитам, без НДС",
+            series_data=series_65,
+            months=months,
+        )
+
+    # ---- Слайд 66. Доля ФОТ в полной выручке (3 линии) ----
+    # Полная выручка = сумма по всем юнитам (кроме UK Estate, если пуст).
+    total_rev = {m: 0.0 for m in months}
+    for u in ("Latvia", "East-Восток", "Europe", "UK Estate"):
+        if u in unit_rev:
+            for m in months:
+                total_rev[m] += unit_rev[u].get(m, 0.0) or 0.0
+
+    # Собираем ФОТ по типам. В ОПиУ есть только:
+    #   - ФОТ производственного персонала
+    #   - ФОТ коммерческого персонала
+    # Административный ФОТ отдельно не выделен → 0.
+    fot_prod_total = {m: 0.0 for m in months}
+    fot_comm_total = {m: 0.0 for m in months}
+
+    for u_name in _UNITS:
+        if u_name not in units:
+            continue
+        for obj_name, obj in units[u_name]["objects"].items():
+            fp = _find_object_fot(rows, _SECTION_PROD, u_name, obj_name)
+            fc = _find_object_fot(rows, _SECTION_COMM, u_name, obj_name)
+            for m in months:
+                fot_prod_total[m] += fp.get(m, 0.0)
+                fot_comm_total[m] += fc.get(m, 0.0)
+
+    series_66 = [
+        {
+            "name": "Доля производственного ФОТ",
+            "color": "C00000",
+            "values": {
+                m: (abs(fot_prod_total[m]) / total_rev[m]) if total_rev[m] else 0.0
+                for m in months
+            },
+        },
+        {
+            "name": "Доля административного ФОТ",
+            "color": "70AD47",
+            "values": {m: 0.0 for m in months},
+        },
+        {
+            "name": "Доля коммерческого ФОТ",
+            "color": "FFC000",
+            "values": {
+                m: (abs(fot_comm_total[m]) / total_rev[m]) if total_rev[m] else 0.0
+                for m in months
+            },
+        },
+    ]
+    _sheet_fot_share_full(
+        wb,
+        sheet_title=_sheet_name_with_slide(66, "Доля_ФОТ_полная_выручка"),
+        chart_title="Анализ ОПиУ — Доля ФОТ в полной выручке",
+        subtitle="Доля ФОТ в полной выручке, %",
+        series_data=series_66,
+        months=months,
+    )
+
+    # ---- Слайд 67. EBITDA margin общий (1 линия) ----
+    total_net = {m: 0.0 for m in months}
+    for u in ("Latvia", "East-Восток", "Europe", "UK Estate"):
+        if u in unit_net:
+            for m in months:
+                total_net[m] += unit_net[u].get(m, 0.0) or 0.0
+
+    ebitda_common = {
+        m: (total_net[m] / total_rev[m]) if total_rev[m] else 0.0
+        for m in months
+    }
+    _sheet_ebitda_common(
+        wb,
+        sheet_title=_sheet_name_with_slide(67, "EBITDA_margin_общий"),
+        chart_title="Операционная рентабельность (EBITDA margin)",
+        subtitle="EBITDA margin, %",
+        data_values=ebitda_common,
+        months=months,
+    )
+
+    # ---- Слайд 68. Динамика валовой прибыли (stacked bar, 3 серии) ----
+    series_68 = []
+    colors_68 = {
+        "Latvia":      "7030A0",   # фиолетовый
+        "East-Восток": "C00000",   # красный
+        "Europe":      "FFC000",   # жёлтый
+    }
+    for u in ("Latvia", "East-Восток", "Europe"):
+        if u in unit_net:
+            series_68.append({
+                "name": u,
+                "color": colors_68.get(u, "808080"),
+                "values": unit_net[u],
+            })
+    if series_68:
+        _sheet_profit_dynamics(
+            wb,
+            sheet_title=_sheet_name_with_slide(68, "Динамика_валовой_прибыли"),
+            chart_title="Динамика валовой прибыли",
+            subtitle="Динамика валовой прибыли по юнитам",
+            series_data=series_68,
+            months=months,
+        )
+
+    # ---- Слайд 69. EBITDA margin юнитов (3 линии) ----
+    series_69 = []
+    colors_69 = {
+        "Latvia":      "70AD47",   # зелёный
+        "East-Восток": "C00000",   # красный
+        "Europe":      "FFC000",   # жёлтый
+    }
+    for u in ("Latvia", "East-Восток", "Europe"):
+        if u in unit_rev and u in unit_net:
+            margins = {}
+            for m in months:
+                r = unit_rev[u].get(m, 0.0) or 0.0
+                n = unit_net[u].get(m, 0.0) or 0.0
+                margins[m] = (n / r) if r else 0.0
+            series_69.append({
+                "name": u,
+                "color": colors_69.get(u, "808080"),
+                "values": margins,
+            })
+    if series_69:
+        _sheet_ebitda_units(
+            wb,
+            sheet_title=_sheet_name_with_slide(69, "EBITDA_margin_юнитов"),
+            chart_title="Динамика операционной рентабельности (EBITDA margin) юнитов",
+            subtitle="EBITDA margin юнитов, %",
+            series_data=series_69,
+            months=months,
+        )
+
+    # --------------------------------------------------------
     # 1b. Точки безубыточности (слайды 6, 44, 63)
     # --------------------------------------------------------
     # Слайд 6 — ТБУ Латвия
@@ -1543,6 +1991,8 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                         fact_label=f"ЧП {obj_short} факт (с НДС)",
                     )
 
+
+
         # ----------------------------------------------------
         # 3. Блок «Коммерческие»
         # ----------------------------------------------------
@@ -1606,6 +2056,93 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 months=months,
                 plan_label="ЧП Коммерческие план (с НДС)",
                 fact_label="ЧП Коммерческие факт (с НДС)",
+            )
+
+    # --------------------------------------------------------
+    # 2b. Nomiqa: Восток и Европа (слайды 79–84)
+    # --------------------------------------------------------
+    if "Nomiqa" in units:
+        nom = units["Nomiqa"]
+
+        # ---- Слайд 79/83. ОПиУ Nomiqa Восток (BNQ_BAKU-Nomiqa) ----
+        bnq = nom["objects"].get("BNQ_BAKU-Nomiqa")
+        if bnq:
+            _sheet_revenue_profit(
+                wb,
+                sheet_title=_sheet_name_with_slide(79, "ОПиУ_Nomiqa_Восток"),
+                chart_title="ОПиУ Nomiqa Восток",
+                subtitle="Динамика Выручки и Чистой прибыли Nomiqa Восток",
+                color_rev=_COLOR_REVENUE,
+                color_net=_COLOR_NET,
+                data=bnq,
+                months=months,
+            )
+
+            # План/Факт (слайд 80)
+            plan_bnq = _parse_bdr_plan_object(
+                bdr_path, "Nomiqa", "BNQ_BAKU-Nomiqa", months
+            )
+            _sheet_plan_fact(
+                wb,
+                sheet_title=_sheet_name_with_slide(80, "ПланФакт_Nomiqa_Восток"),
+                chart_title="Выполнение годового плана по ЧП Nomiqa Восток",
+                subtitle="План (БДиР) vs Факт (ОПиУ) — Nomiqa Восток",
+                data_plan=plan_bnq,
+                data_fact=bnq["net"],
+                months=months,
+            )
+
+            # Итог (слайд 81)
+            _sheet_cumulative_plan_fact(
+                wb,
+                sheet_title=_sheet_name_with_slide(81, "Итог_Nomiqa_Восток"),
+                chart_title="Выполнение годового плана по валовой прибыли Nomiqa Восток",
+                data_plan=plan_bnq,
+                data_fact=bnq["net"],
+                months=months,
+                plan_label="ЧП Nomiqa Восток план",
+                fact_label="ЧП Nomiqa Восток факт",
+            )
+
+        # ---- Слайд 82. ОПиУ Nomiqa Европа (ENQ_Europe-Nomiqa) ----
+        enq = nom["objects"].get("ENQ_Europe-Nomiqa")
+        if enq:
+            _sheet_revenue_profit(
+                wb,
+                sheet_title=_sheet_name_with_slide(82, "ОПиУ_Nomiqa_Европа"),
+                chart_title="ОПиУ Nomiqa Европа",
+                subtitle="Динамика Выручки и Чистой прибыли Nomiqa Европа",
+                color_rev=_COLOR_REVENUE,
+                color_net=_COLOR_NET,
+                data=enq,
+                months=months,
+            )
+
+            # Слайд 83 — фактически дубль 82, но с другим заголовком.
+            _sheet_revenue_profit(
+                wb,
+                sheet_title=_sheet_name_with_slide(83, "Динамика_Nomiqa_Европа"),
+                chart_title="Динамика Выручки и Чистой прибыли Nomiqa Европа",
+                subtitle="Nomiqa Европа, факт",
+                color_rev=_COLOR_REVENUE,
+                color_net=_COLOR_NET,
+                data=enq,
+                months=months,
+            )
+
+            # Итог (слайд 84)
+            plan_enq = _parse_bdr_plan_object(
+                bdr_path, "Nomiqa", "ENQ_Europe-Nomiqa", months
+            )
+            _sheet_cumulative_plan_fact(
+                wb,
+                sheet_title=_sheet_name_with_slide(84, "Итог_Nomiqa_Европа"),
+                chart_title="Выполнение годового плана по валовой прибыли Nomiqa Европа",
+                data_plan=plan_enq,
+                data_fact=enq["net"],
+                months=months,
+                plan_label="ЧП Nomiqa Европа план",
+                fact_label="ЧП Nomiqa Европа факт",
             )
 
     # --------------------------------------------------------
