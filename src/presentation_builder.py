@@ -318,15 +318,26 @@ def _collect_breakeven(rows, months):
     Возвращает {unit_name: {month: value}} — точку безубыточности
     по каждому юниту.
 
-    ТБУ = |Производственные расходы| + |Косвенные расходы|,
-    рассчитанные для каждого юнита (по его объектам).
+    Логика:
+      ТБУ = |Производственные расходы| + |Косвенные расходы|.
 
-    В ОПиУ секции «Производственные расходы» и «Косвенные расходы»
-    имеют структуру:
-       · <Юнит>          ← level 1
-       ·· <Объект>       ← level 2
-       ··· <Статья>      ← level 3+
-    Берём суммы по всем объектам юнита.
+    ВАЖНО: в ОПиУ секции «Производственные расходы» и «Косвенные расходы»
+    имеют РАЗНУЮ структуру вложенности:
+
+      Производственные расходы             ← level 0
+      · Прямые производственные            ← level 1 (промежуточный)
+      ·· Latvia                            ← level 2 (юнит)
+      ··· AN14 …                           ← level 3 (объект)
+      ···· 1.2.10 Коммунальные платежи     ← level 4 (статья)
+
+      Косвенные расходы                    ← level 0
+      · Административные расходы           ← level 1 (категория)
+      ·· Latvia                            ← level 2 (юнит)
+      ··· AN14 …                           ← level 3 (объект)
+
+    Поэтому ищем юнит по ИМЕНИ (входит в _UNITS), а не по уровню.
+    Учитываем только строку-объект, но НЕ его дочерние статьи,
+    чтобы не удвоить сумму.
     """
     _SECTION_PROD = "Производственные расходы"
     _SECTION_INDIRECT = "Косвенные расходы"
@@ -335,24 +346,38 @@ def _collect_breakeven(rows, months):
 
     cur_section = None
     cur_unit = None
+    cur_unit_level = None
 
     for r, lvl, title, values in rows:
+        # level 0 — переключение секции
         if lvl == 0:
             cur_section = title
             cur_unit = None
+            cur_unit_level = None
             continue
 
-        if lvl == 1:
+        # Ищем юнит ПО ИМЕНИ (не по уровню)
+        # Обновляем cur_unit, если это имя из _UNITS.
+        if title in _UNITS:
             cur_unit = title
+            cur_unit_level = lvl
             continue
 
-        # level 2 (объект) в нужной секции
-        if (lvl == 2
-                and cur_unit in _UNITS
-                and cur_section in (_SECTION_PROD, _SECTION_INDIRECT)):
-            for m in months:
-                v = values.get(m, 0.0) or 0.0
-                result[cur_unit][m] += abs(v)
+        # Работаем только в нужных секциях и внутри какого-то юнита
+        if cur_section not in (_SECTION_PROD, _SECTION_INDIRECT):
+            continue
+        if cur_unit is None:
+            continue
+
+        # Берём только СЛЕДУЮЩИЙ уровень после юнита
+        # (это объект). Не заходим глубже — иначе задвоим.
+        if lvl != cur_unit_level + 1:
+            continue
+
+        # Складываем по модулю
+        for m in months:
+            v = values.get(m, 0.0) or 0.0
+            result[cur_unit][m] += abs(v)
 
     return result
 
