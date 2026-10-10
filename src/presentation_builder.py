@@ -80,7 +80,7 @@ _LATVIA_COMMERCIAL = [
     "SK3-Skunju 3",
     "UK_Latvia",
     "V22 К. Валдемара 22",
-    "BRN_Brunieku",              # ← добавлено
+    "BRN_Brunieku",
 ]
 
 # Номера слайдов для юнитов (первый слайд с ОПиУ каждого юнита)
@@ -2335,6 +2335,10 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # а просто месячный ROI.
 
     investments_all = _parse_investments_all(config.REF_INVESTMENTS_FILE)
+    print(f"[ROI] Всего вложений распарсено: {len(investments_all)} объектов")
+    for k, v in list(investments_all.items())[:5]:
+        print(f"[ROI]   {k}: {v}")
+    print(f"[ROI]   BRN_Brunieku [Latvia] = {investments_all.get('BRN_Brunieku [Latvia]', 'НЕ НАЙДЕН')}")
 
     # Группы объектов и соответствие «группа → источник ЧП»
     roi_groups = [
@@ -2411,6 +2415,7 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     for roi_name, inv_objects, net_source, net_key, color in roi_groups:
         # Сумма вложений по группе
         inv_total = _sum_investments(investments_all, inv_objects)
+        print(f"[ROI] {roi_name}: inv_total={inv_total} (объектов: {len(inv_objects)})")
 
         # ЧП группы (помесячно)
         if net_source == "obj":
