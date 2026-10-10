@@ -1474,6 +1474,9 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     chart.width = 32
     chart.height = 11
 
+    # Заголовок диаграммы (как в PowerPoint: сверху по центру).
+    chart.title = chart_title
+
     chart.dLbls = DataLabelList()
     chart.dLbls.showVal = True
     chart.dLbls.showSerName = False
