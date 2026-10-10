@@ -1485,11 +1485,21 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     chart.legend.position = "t"
     chart.legend.overlay = False
 
-    # Включаем оси и задаём числовой формат оси X.
-    # Без этого Excel может её скрыть.
+    # Включаем оси и задаём настройки, чтобы Excel гарантированно
+    # нарисовал ось X и подписи категорий («План» / «Факт»).
     chart.x_axis.delete = False
     chart.y_axis.delete = False
     chart.x_axis.numFmt = '#,##0'
+    chart.x_axis.majorTickMark = "out"
+    chart.x_axis.tickLblPos = "nextTo"
+    chart.x_axis.title = "Периоды"
+
+    chart.y_axis.majorTickMark = "out"
+    chart.y_axis.tickLblPos = "nextTo"
+
+    # Формат линий — убираем серую сетку, чтобы было как в PowerPoint
+    chart.x_axis.majorGridlines = None
+    chart.y_axis.majorGridlines = None
 
     # ВАЖНО: используем абсолютный якорь вместо "A6".
     # Строковый якорь иногда «съезжает» в скрытые строки
