@@ -725,6 +725,69 @@ def _sheet_breakeven(wb, sheet_title, chart_title, subtitle,
 
     ws.add_chart(chart, "E4")
 
+def _sheet_dds(wb, sheet_title, chart_title, subtitle,
+               data_inflow, data_outflow, months):
+    """
+    Лист «Анализ ДДС» — столбики «Поступления» (зелёные) и
+    «Выбытия» (красные). Данные берём из ОДДС.
+    """
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Поступления", "Выбытия"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_inflow.get(m, 0.0) or 0.0, 2),
+            round(data_outflow.get(m, 0.0) or 0.0, 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    # Поступления — зелёные, Выбытия — красные
+    chart.series[0].graphicalProperties.solidFill = "70AD47"
+    chart.series[0].graphicalProperties.line.solidFill = "70AD47"
+    chart.series[1].graphicalProperties.solidFill = "C00000"
+    chart.series[1].graphicalProperties.line.solidFill = "C00000"
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
+
+
+
 # ============================================================
 # ГЛАВНАЯ ФУНКЦИЯ
 # ============================================================
@@ -973,6 +1036,87 @@ def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
     for c in range(2, 2 + len(months)):
         col_letter = ws.cell(row=header_row, column=c).column_letter
         ws.column_dimensions[col_letter].width = 12
+
+def _collect_dds(odds_path, unit_name, months):
+    """
+    Читает строки-агрегаты «Поступления» и «Списания» юнита из ОДДС.
+    В ОДДС они идут БЕЗ имени (столбец A пустой) сразу под именем юнита.
+
+    Возвращает:
+       {"inflow":  {month: value}, "outflow": {month: value}}
+       где outflow — по модулю.
+    """
+    result = {
+        "inflow":  {m: 0.0 for m in months},
+        "outflow": {m: 0.0 for m in months},
+    }
+    if not odds_path or not os.path.exists(odds_path):
+        return result
+
+    wb = openpyxl.load_workbook(odds_path, data_only=True)
+    ws = wb.active
+
+    # 1) Шапка
+    header_row = None
+    for r in range(1, 8):
+        v = ws.cell(row=r, column=1).value
+        if v and "направление" in str(v).lower():
+            header_row = r
+            break
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    # 2) Ищем строку юнита (level 0)
+    unit_row = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+        if lvl == 0 and title == unit_name:
+            unit_row = r
+            break
+
+    if unit_row is None:
+        return result
+
+    # 3) Следующие две числовые строки — поступления и выбытия.
+    collected = 0
+    for r in range(unit_row + 1, unit_row + 10):
+        raw = ws.cell(row=r, column=1).value
+
+        # Если встретили следующий юнит (level 0) — стоп
+        if raw is not None:
+            title = _clean(raw)
+            lvl = _level(raw)
+            if lvl == 0 and title:
+                break
+            if lvl >= 1 and title:
+                break
+
+        vals = {m: _num(ws, r, col) for m, col in month_col.items()}
+        if not any(vals.values()):
+            continue
+
+        if collected == 0:
+            for m in months:
+                result["inflow"][m] = vals.get(m, 0.0) or 0.0
+        elif collected == 1:
+            for m in months:
+                result["outflow"][m] = abs(vals.get(m, 0.0) or 0.0)
+        else:
+            break
+
+        collected += 1
+        if collected >= 2:
+            break
+
+    return result
+
+
 
 def _parse_odds_balance(odds_path, unit_name, months):
     """
@@ -1501,6 +1645,21 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 chart_title="Операционное сальдо Латвия (без НДС)",
                 subtitle=f"Факт за {_MONTHS_RU_LOWER.get(month, '')} {year}",
                 rows_data=lat_bal["rows"],
+                months=months,
+            )
+
+
+        # --- Латвия (слайд 3) — Анализ ДДС ---
+        lat_dds = _collect_dds(odds_path, "Latvia", months)
+        if any(lat_dds["inflow"].values()) or any(lat_dds["outflow"].values()):
+            _sheet_dds(
+                wb,
+                sheet_title=_sheet_name_with_slide(3, "ДДС_Latvia"),
+                chart_title="Анализ ДДС Латвия",
+                subtitle="Поступления и выбытия Латвия "
+                         "(операционная деятельность) без НДС, евро",
+                data_inflow=lat_dds["inflow"],
+                data_outflow=lat_dds["outflow"],
                 months=months,
             )
 
