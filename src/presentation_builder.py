@@ -1445,13 +1445,37 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
 
     plan_cols = {}
     fact_cols = {}
-    for m in months:
-        p = data_plan.get(m, 0.0) or 0.0
-        f = data_fact.get(m, 0.0) or 0.0
-        # Уменьшаем общее количество столбцов для лучшей читаемости
-        # _TOTAL_BAR_COLUMNS = 50
-        plan_cols[m] = max(2, round(p / total_plan * _TOTAL_BAR_COLUMNS))
-        fact_cols[m] = max(2, round(f / total_fact * _TOTAL_BAR_COLUMNS))
+    # Считаем «сырые» ширины и нормализуем так, чтобы их сумма
+    # была ровно _TOTAL_BAR_COLUMNS. Это гарантирует, что все полосы
+    # уместятся в отведенный диапазон и не залезут на колонку итогов.
+    raw_plan = {m: max(0.0, data_plan.get(m, 0.0) or 0.0) for m in months}
+    raw_fact = {m: max(0.0, data_fact.get(m, 0.0) or 0.0) for m in months}
+    sum_raw_plan = sum(raw_plan.values()) or 1.0
+    sum_raw_fact = sum(raw_fact.values()) or 1.0
+
+    def _normalize_widths(raw, total, total_cols, min_width=2):
+        widths = {}
+        for m in months:
+            w = max(min_width, round(raw[m] / total * total_cols))
+            widths[m] = w
+        # Корректируем, чтобы сумма точно равнялась total_cols
+        diff = sum(widths.values()) - total_cols
+        # Уменьшаем/увеличиваем начиная с самых широких полос
+        while diff != 0:
+            sorted_months = sorted(months, key=lambda mm: widths[mm], reverse=(diff > 0))
+            for m in sorted_months:
+                if diff == 0:
+                    break
+                if diff > 0 and widths[m] > min_width:
+                    widths[m] -= 1
+                    diff -= 1
+                elif diff < 0:
+                    widths[m] += 1
+                    diff += 1
+        return widths
+
+    plan_cols = _normalize_widths(raw_plan, sum_raw_plan, _TOTAL_BAR_COLUMNS)
+    fact_cols = _normalize_widths(raw_fact, sum_raw_fact, _TOTAL_BAR_COLUMNS)
 
     # ---- 4. Строка «План» ----
     plan_row = 5
@@ -1518,7 +1542,9 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         col += width
 
     # ---- 6. Итоги справа ----
-    sum_col = 2 + _TOTAL_BAR_COLUMNS + 2
+    # Отступаем достаточно далеко от полос, чтобы гарантированно
+    # не пересечься с объединенными ячейками строк «План» и «Факт».
+    sum_col = 2 + _TOTAL_BAR_COLUMNS + 10
 
     sum_plan = sum(data_plan.get(m, 0.0) for m in months)
     sum_fact = sum(data_fact.get(m, 0.0) for m in months)
@@ -1574,6 +1600,9 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     for r in range(1, axis_row + 2):
         for c in range(1, sum_col + 2):
             cell = ws.cell(row=r, column=c)
+            # Пропускаем MergedCell — у них нельзя менять ни value, ни fill
+            if type(cell).__name__ == "MergedCell":
+                continue
             if cell.value is None:
                 cell.fill = bg
 
