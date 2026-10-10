@@ -1421,20 +1421,26 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         ws.cell(row=header_row, column=i,
                 value=_MONTHS_RU_LOWER[m].capitalize()).font = Font(bold=True)
 
-    # ВАЖНО: подписи категорий должны быть КОРОТКИМИ,
-    # иначе Excel обрежет их на оси Y.
-    # Полные названия (fact_label / plan_label) сохраняем
-    # как комментарий — они не нужны на диаграмме.
+    # Короткие подписи категорий — «План» и «Факт».
+    # Их Excel возьмёт как подписи оси Y.
     ws.cell(row=fact_row, column=1, value="Факт").font = Font(bold=True)
     ws.cell(row=plan_row, column=1, value="План").font = Font(bold=True)
 
+    # Заполняем данными. Шрифт делаем БЕЛЫМ и мелким — на белом фоне
+    # числа визуально не будут видны, но Excel их использует для диаграммы.
     for i, m in enumerate(months, start=2):
+        hc = ws.cell(row=header_row, column=i)
+        hc.font = Font(color="FFFFFF", size=8)
+
         fc = ws.cell(row=fact_row, column=i,
                      value=float(data_fact.get(m, 0.0) or 0.0))
         fc.number_format = '#,##0'
+        fc.font = Font(color="FFFFFF", size=8)
+
         pc = ws.cell(row=plan_row, column=i,
                      value=float(data_plan.get(m, 0.0) or 0.0))
         pc.number_format = '#,##0'
+        pc.font = Font(color="FFFFFF", size=8)
 
     # ---- 2. Диаграмма ----
     chart = BarChart()
@@ -1478,6 +1484,12 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
 
     chart.legend.position = "t"
     chart.legend.overlay = False
+
+    # Включаем оси и задаём числовой формат оси X.
+    # Без этого Excel может её скрыть.
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.x_axis.numFmt = '#,##0'
 
     # ВАЖНО: используем абсолютный якорь вместо "A6".
     # Строковый якорь иногда «съезжает» в скрытые строки
@@ -1526,11 +1538,13 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
         ws.column_dimensions[get_column_letter(i)].width = 10
     ws.column_dimensions[get_column_letter(box_col)].width = 14
 
-    # ---- 4. Скрываем СОДЕРЖИМОЕ служебных строк, но не сами строки ----
-    # Прячем значения ячеек через белый шрифт и тонкую высоту строк.
-    # Так диаграмма остаётся рабочей, а служебные данные не видны.
-    for r in (header_row, fact_row, plan_row):
-        ws.row_dimensions[r].height = 1  # почти нулевая высота
+    # ---- 4. Строки 2-4 оставляем нормальной высоты ----
+    # Excel использует их как источник подписей категорий («План» / «Факт»)
+    # и заголовков серий (месяцы). Если их сжать, Excel теряет подписи
+    # и ось X. Числа в этих строках уже сделаны белыми — визуально не видны.
+    #
+    # Ничего не делаем — просто оставляем строки как есть.
+    pass
 
     ws.sheet_view.showGridLines = False
     return ws
