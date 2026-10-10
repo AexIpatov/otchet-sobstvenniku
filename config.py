@@ -97,6 +97,7 @@ FORCE_OVERWRITE_FORMULAS = False
 
 REF_OBJECTS_FILE     = REF_DIR / "Список Объектов Estate.xlsx"
 REF_INVESTMENTS_FILE = REF_DIR / "Вложенные средства на объекты.xlsx"
+REF_DEBTS_FILE       = REF_DIR / "таблица Долги и Численность сотрудников.xlsx"
 
 TEMPLATE_FILES = {
     "Estate": TEMPLATES_DIR / "Шаблон Отчета Estate.xlsx",

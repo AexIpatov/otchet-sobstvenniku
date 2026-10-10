@@ -313,6 +313,421 @@ def _find_object_fot(rows, section, unit, object_name):
 
     return result
 
+def _collect_unit_expenses(rows, unit_name, months):
+    """
+    Считает сумму расходов юнита по модулю во всех трёх секциях:
+      • Производственные расходы
+      • Косвенные расходы
+      • Коммерческие расходы
+
+    Берёт только строки уровня 2 (объекты) внутри юнита,
+    чтобы не задвоить суммы.
+    """
+    sections = (
+        "Производственные расходы",
+        "Косвенные расходы",
+        "Коммерческие расходы",
+    )
+    result = {m: 0.0 for m in months}
+
+    cur_section = None
+    cur_unit = None
+    cur_unit_level = None
+
+    for r, lvl, title, values in rows:
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            cur_unit_level = None
+            continue
+
+        # Ищем юнит по имени
+        if title == unit_name:
+            if cur_section in sections:
+                cur_unit = title
+                cur_unit_level = lvl
+            continue
+
+        if cur_section not in sections:
+            continue
+        if cur_unit is None:
+            continue
+
+        # Берём только следующий уровень после юнита — это объект.
+        # Для UK Estate объектов нет — берём уровень +1 (статьи).
+        if lvl != cur_unit_level + 1:
+            continue
+
+        for m in months:
+            v = values.get(m, 0.0) or 0.0
+            result[m] += abs(v)
+
+    return result
+
+def _parse_investments(ref_path, unit_name, months):
+    """
+    Читает справочник «Вложенные средства на объекты.xlsx».
+    Возвращает {month: value} — сумму вложений по юниту (если по месяцам),
+    либо усреднённое значение.
+
+    Если структура файла другая — нужно адаптировать.
+    """
+    result = {m: 0.0 for m in months}
+    if not ref_path or not os.path.exists(ref_path):
+        return result
+
+    wb = openpyxl.load_workbook(ref_path, data_only=True)
+    ws = wb.active
+
+    # Ищем строку с названием юнита и столбцы с месяцами.
+    header_row = None
+    for r in range(1, 6):
+        v = ws.cell(row=r, column=1).value
+        if v and "объект" in str(v).lower():
+            header_row = r
+            break
+    if header_row is None:
+        header_row = 1
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    for r in range(header_row + 1, ws.max_row + 1):
+        name = _clean(ws.cell(row=r, column=1).value)
+        if name == unit_name:
+            for m, col in month_col.items():
+                result[m] = _num(ws, r, col)
+            return result
+
+    return result
+
+def _parse_debts(debts_path, months):
+    """
+    Читает файл «таблица Долги и Численность сотрудников.xlsx».
+
+    Структура листа:
+      Строка 1: «Долги по объектам аренды» (заголовок)
+      Строка 2: «Объект» | даты (2026-01-01, 2026-02-01, ...)
+      Строки 3..N: <Объект> | числа по месяцам
+      ... пропуск ...
+      Строка M: «Численность сотрудников Estate»
+      Строка M+1: даты
+      Строка M+2: «Численность сотрудников Estate» | числа
+
+    Возвращает:
+      {
+        "debts": {object_name: {month: value}},
+        "headcount": {month: value},
+      }
+    """
+    result = {
+        "debts": {},
+        "headcount": {m: 0.0 for m in months},
+    }
+    if not debts_path or not os.path.exists(debts_path):
+        return result
+
+    wb = openpyxl.load_workbook(debts_path, data_only=True)
+    ws = wb.active
+
+    # Ищем шапку «Объект» + строка с датами
+    header_row = None
+    for r in range(1, 15):
+        v = ws.cell(row=r, column=1).value
+        if v and "объект" in str(v).lower():
+            header_row = r
+            break
+    if header_row is None:
+        return result
+
+    # Собираем {month: col} из дат в шапке
+    month_col = {}
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=header_row, column=c).value
+        if isinstance(v, (_dt.datetime, _dt.date)):
+            if v.month in months:
+                month_col[v.month] = c
+
+    if not month_col:
+        return result
+
+    # Идём по строкам данных до строки «Численность...»
+    headcount_header_row = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        name = _clean(ws.cell(row=r, column=1).value)
+        if not name:
+            continue
+        if "численность" in name.lower():
+            headcount_header_row = r
+            break
+
+        vals = {}
+        for m, col in month_col.items():
+            vals[m] = _num(ws, r, col)
+        result["debts"][name] = vals
+
+    # Парсим численность — идём после headcount_header_row
+    if headcount_header_row is not None:
+        hc_row = headcount_header_row + 2
+        first_val = _clean(ws.cell(row=hc_row, column=1).value)
+        if "численность" not in first_val.lower():
+            for rr in range(headcount_header_row + 1,
+                            min(headcount_header_row + 5, ws.max_row + 1)):
+                v = _clean(ws.cell(row=rr, column=1).value)
+                if "численность" in v.lower():
+                    hc_row = rr
+                    break
+
+        hc_month_col = {}
+        for c in range(2, ws.max_column + 1):
+            for rr in (headcount_header_row + 1, headcount_header_row):
+                v = ws.cell(row=rr, column=c).value
+                if isinstance(v, (_dt.datetime, _dt.date)):
+                    if v.month in months:
+                        hc_month_col[v.month] = c
+                    break
+
+        if not hc_month_col:
+            hc_month_col = month_col
+
+        for m, col in hc_month_col.items():
+            result["headcount"][m] = _num(ws, hc_row, col)
+
+    return result
+
+
+def _sheet_debts_bars(wb, sheet_title, chart_title, subtitle,
+                      objects, months):
+    """
+    Лист «Долги» — столбики (для слайдов 14, 19).
+    objects — список: [{"name": ..., "color": ..., "values": {m: v}}]
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [o["name"] for o in objects]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for o in objects:
+            row.append(round(o["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(objects),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, o in enumerate(objects):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.solidFill = o["color"]
+            chart.series[idx].graphicalProperties.line.solidFill = o["color"]
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_debts_lines(wb, sheet_title, chart_title, subtitle,
+                       objects, months):
+    """
+    Лист «Долги» — линии (для слайда 24).
+    objects — список: [{"name": ..., "color": ..., "values": {m: v}}]
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [o["name"] for o in objects]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for o in objects:
+            row.append(round(o["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(objects),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, o in enumerate(objects):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = o["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_headcount_analysis(wb, sheet_title, chart_title, subtitle,
+                              headcount, total_revenue, total_fot, months):
+    """
+    Лист «Анализ ОПиУ» (слайд 64) — 3 линии:
+      • Численность
+      • Выручка на 1 сотрудника
+      • Средняя ЗП на 1 сотрудника
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Численность",
+               "Выручка на 1 сотрудника",
+               "Средняя ЗП на 1 сотрудника"]
+    rows_data = []
+    for m in months:
+        hc = headcount.get(m, 0.0) or 0.0
+        rev = total_revenue.get(m, 0.0) or 0.0
+        fot = total_fot.get(m, 0.0) or 0.0
+        rev_per = (rev / hc) if hc else 0.0
+        fot_per = (abs(fot) / hc) if hc else 0.0
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(hc, 2),
+            round(rev_per, 2),
+            round(fot_per, 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=4,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    colors = ["4472C4", "C00000", "70AD47"]
+    for idx, c in enumerate(colors):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = c
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+def _sheet_roi(wb, sheet_title, chart_title, subtitle,
+               series_data, months):
+    """
+    series_data — список: [{"name": ..., "color": ..., "values": {m: roi}}]
+    """
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.00%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.00%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.00%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
 def _collect_breakeven(rows, months):
     """
     Возвращает {unit_name: {month: value}} — точку безубыточности
@@ -1547,9 +1962,10 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         "Latvia":       (_UNIT_SLIDE_START["Latvia"],     5,  7),
         "East-Восток":  (_UNIT_SLIDE_START["East-Восток"], 42, 40),
         "Europe":       (_UNIT_SLIDE_START["Europe"],     51, 52),
-        "Nomiqa":       (_UNIT_SLIDE_START["Nomiqa"],     73, 0),  # ← Доля ФОТ = 0 (нет отдельного слайда)
-        "Unelma":       (_UNIT_SLIDE_START["Unelma"],     68, 0),  # ← Доля ФОТ = 0 (нет отдельного слайда)
-        "UK Estate":    (_UNIT_SLIDE_START["UK Estate"],  57, 58),
+        "Nomiqa":       (_UNIT_SLIDE_START["Nomiqa"],     73, 0),
+        "Unelma":       (_UNIT_SLIDE_START["Unelma"],     68, 0),
+        # UK Estate генерируется отдельно на слайдах 61–62 (см. блок 4 ниже).
+        "UK Estate":    (0, 0, 0),
     }
 
     for unit_name in _UNITS:
@@ -1835,6 +2251,50 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             series_data=series_69,
             months=months,
         )
+
+    # ---- Слайд 70. ROI по юнитам (5 линий) ----
+    # ROI = ЧП / Вложенные средства
+    # Вложенные средства — из data/input/Справочники/Вложенные средства на объекты.xlsx
+    roi_groups = [
+        ("Антонияс",     "AN14 Антониас 14 (дом + парковка)", "70AD47"),
+        ("Чака",         "AC89 Чака 89 (дом + парковка)",     "C00000"),
+        ("Коммерческие", "Коммерческие помещения LV",         "FFC000"),
+        ("Азербайджан",  "East-Восток",                       "548235"),
+        ("Европа",       "Europe",                            "ED7D31"),
+    ]
+
+    series_70 = []
+    for roi_name, src_name, color in roi_groups:
+        investments = _parse_investments(
+            config.REF_INVESTMENTS_FILE, src_name, months
+        )
+        if src_name in units:
+            net = units[src_name]["net"]
+        elif "Latvia" in units and src_name in units["Latvia"]["objects"]:
+            net = units["Latvia"]["objects"][src_name]["net"]
+        else:
+            net = {m: 0.0 for m in months}
+
+        roi_vals = {}
+        for m in months:
+            inv = investments.get(m, 0.0)
+            n = net.get(m, 0.0)
+            roi_vals[m] = (n / inv) if inv else 0.0
+
+        series_70.append({
+            "name": roi_name,
+            "color": color,
+            "values": roi_vals,
+        })
+
+    _sheet_roi(
+        wb,
+        sheet_title=_sheet_name_with_slide(70, "ROI_по_юнитам"),
+        chart_title="ROI по юнитам",
+        subtitle="ROI по юнитам, %",
+        series_data=series_70,
+        months=months,
+    )
 
     # --------------------------------------------------------
     # 1b. Точки безубыточности (слайды 6, 44, 63)
@@ -2146,6 +2606,64 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             )
 
     # --------------------------------------------------------
+    # 2c. Estate консолидированный (слайды 58–60)
+    #     = Latvia + Europe + East-Восток
+    # --------------------------------------------------------
+    estate_cons = {
+        "revenue": {m: 0.0 for m in months},
+        "net":     {m: 0.0 for m in months},
+        "fot":     {m: 0.0 for m in months},
+    }
+    for u_name in ("Latvia", "Europe", "East-Восток"):
+        if u_name in units:
+            for m in months:
+                estate_cons["revenue"][m] += units[u_name]["revenue"].get(m, 0.0)
+                estate_cons["net"][m]     += units[u_name]["net"].get(m, 0.0)
+                estate_cons["fot"][m]     += units[u_name]["fot"].get(m, 0.0)
+
+    # Слайд 58 — ОПиУ Estate консолидированный
+    _sheet_revenue_profit(
+        wb,
+        sheet_title=_sheet_name_with_slide(58, "ОПиУ_Estate_консолид"),
+        chart_title="ОПиУ Консолидированный Estate, без НДС",
+        subtitle="Выручка & Чистая прибыль Estate, без НДС",
+        color_rev=_COLOR_REVENUE,
+        color_net=_COLOR_NET,
+        data=estate_cons,
+        months=months,
+    )
+
+    # Слайд 59 — ПланФакт Estate консолидированный
+    plan_estate = {m: 0.0 for m in months}
+    if bdr_path and os.path.exists(bdr_path):
+        for u_name in ("Latvia", "East-Восток", "Europe"):
+            p = _parse_bdr_plan(bdr_path, u_name, months)
+            for m in months:
+                plan_estate[m] += p.get(m, 0.0)
+
+    _sheet_plan_fact(
+        wb,
+        sheet_title=_sheet_name_with_slide(59, "ПланФакт_Estate"),
+        chart_title="Выполнение годового плана по ЧП Estate, с НДС",
+        subtitle="План (БДиР) vs Факт (ОПиУ) — Estate консолидированный",
+        data_plan=plan_estate,
+        data_fact=estate_cons["net"],
+        months=months,
+    )
+
+    # Слайд 60 — Итог Estate (нарастающим итогом)
+    _sheet_cumulative_plan_fact(
+        wb,
+        sheet_title=_sheet_name_with_slide(60, "Итог_Estate"),
+        chart_title="Выполнение годового плана по валовой прибыли Estate",
+        data_plan=plan_estate,
+        data_fact=estate_cons["net"],
+        months=months,
+        plan_label="ЧП Estate план (с НДС)",
+        fact_label="ЧП Estate факт (с НДС)",
+    )
+
+    # --------------------------------------------------------
     # 3b. Табличные слайды — «Операционное сальдо»
     #     Слайд 2  — Латвия
     #     Слайд 37 — East-Восток
@@ -2200,13 +2718,118 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             )
 
     # --------------------------------------------------------
-    # 4. Специальные листы: Расходы УК (слайд 56)
+    # 3c. Долги (слайды 14, 19, 24) и Численность (слайд 64)
+    # --------------------------------------------------------
+    debts_path = config.REF_DEBTS_FILE
+    if debts_path and os.path.exists(debts_path):
+        debts_data = _parse_debts(debts_path, months)
+
+        # ---- Слайд 14. Долги Антонияс, Матиса, Эспорта ----
+        obj_14 = [
+            ("AN14 Антониас 14",         "F4A6B8"),
+            ("M81 - Matisa 81",           "70AD47"),
+            ("EKS_Esporta iela 12-113",   "FFC000"),
+        ]
+        series_14 = []
+        for obj_name, color in obj_14:
+            vals = debts_data["debts"].get(obj_name, {})
+            if any(v for v in vals.values()):
+                series_14.append({
+                    "name": obj_name.split()[0],
+                    "color": color,
+                    "values": vals,
+                })
+        if series_14:
+            _sheet_debts_bars(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    14, "Долги_Антонияс_Матиса_Эспорта"),
+                chart_title="Долги Антонияс, Матиса и Эспорта",
+                subtitle="Долги по объектам, EUR",
+                objects=series_14,
+                months=months,
+            )
+
+        # ---- Слайд 19. Долги Чака ----
+        vals_chaka = debts_data["debts"].get("AC89 Чака 89", {})
+        if any(vals_chaka.values()):
+            _sheet_debts_bars(
+                wb,
+                sheet_title=_sheet_name_with_slide(19, "Долги_Чака"),
+                chart_title="Долги Чака",
+                subtitle="Долги по объекту AC89 Чака 89, EUR",
+                objects=[{"name": "Чака", "color": "FFC000",
+                          "values": vals_chaka}],
+                months=months,
+            )
+
+        # ---- Слайд 24. Долги коммерческие помещения (5 линий) ----
+        commercial_objs = [
+            ("B117 Бривибас, 117",   "F4A6B8", "B117"),
+            ("DS1 Дзирнаву, 1",       "FF00FF", "DS1"),
+            ("B78 Бривибас, 78",      "C00000", "B78"),
+            ("D4 Парковка-Deglava4",  "70AD47", "D4"),
+            ("MP1_Marupe",             "ED7D31", "MP1"),
+        ]
+        series_24 = []
+        for obj_name, color, short in commercial_objs:
+            vals = debts_data["debts"].get(obj_name, {})
+            if any(v for v in vals.values()):
+                series_24.append({
+                    "name": short,
+                    "color": color,
+                    "values": vals,
+                })
+        if series_24:
+            _sheet_debts_lines(
+                wb,
+                sheet_title=_sheet_name_with_slide(24, "Долги_Коммерческие"),
+                chart_title="Долги коммерческие помещения",
+                subtitle="Долги по коммерческим объектам, EUR",
+                objects=series_24,
+                months=months,
+            )
+
+        # ---- Слайд 64. Анализ ОПиУ (численность, выручка/сотр., ЗП/сотр.) ----
+        hc = debts_data["headcount"]
+
+        total_rev_64 = {m: 0.0 for m in months}
+        for u in _UNITS:
+            if u in units:
+                for m in months:
+                    total_rev_64[m] += units[u]["revenue"].get(m, 0.0)
+
+        total_fot_64 = {m: 0.0 for m in months}
+        for u in _UNITS:
+            if u in units:
+                for m in months:
+                    total_fot_64[m] += units[u]["fot"].get(m, 0.0)
+
+        if any(hc.values()):
+            _sheet_headcount_analysis(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    64, "Анализ_ОПиУ_численность"),
+                chart_title="Анализ ОПиУ",
+                subtitle="Численность, выручка на 1 сотрудника, средняя ЗП на 1 сотрудника",
+                headcount=hc,
+                total_revenue=total_rev_64,
+                total_fot=total_fot_64,
+                months=months,
+            )
+    else:
+        print(f"[presentation_builder] не найден файл долгов: {debts_path}")
+
+    # --------------------------------------------------------
+    # 4. Специальные листы: Расходы УК (слайды 61–62)
     # --------------------------------------------------------
     if "UK Estate" in units:
         uk = units["UK Estate"]
+
+        # Слайд 61 — ОПиУ Расходы УК (столбики расходов)
         _sheet_revenue_profit(
             wb,
-            sheet_title=_sheet_name_with_slide(56, "ОПиУ_Расходы_УК"),
+            sheet_title=_sheet_name_with_slide(61, "ОПиУ_Расходы_УК"),
             chart_title="Расходы УК R1",
             subtitle="ОПиУ Расходы УК",
             color_rev=_COLOR_REVENUE,
@@ -2214,6 +2837,37 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             data=uk,
             months=months,
         )
+
+        # Слайд 62 — Доля расходов УК R1 в операционной выручке Estate
+        # Расходы УК = |все расходы UK Estate| (Произв. + Косв. + Комм.)
+        # Операционная выручка = полная выручка Estate (Latvia + Europe + East-Восток)
+        uk_expenses = _collect_unit_expenses(rows, "UK Estate", months)
+
+        # Полная выручка Estate = сумма трёх юнитов
+        estate_rev_full = {m: 0.0 for m in months}
+        for u_name in ("Latvia", "East-Восток", "Europe"):
+            if u_name in units:
+                for m in months:
+                    estate_rev_full[m] += units[u_name]["revenue"].get(m, 0.0)
+
+        uk_share = {
+            m: (uk_expenses[m] / estate_rev_full[m])
+               if estate_rev_full[m] else 0.0
+            for m in months
+        }
+
+        _sheet_ebitda_common(
+            wb,
+            sheet_title=_sheet_name_with_slide(
+                62, "Доля_расходов_УК_в_выручке"),
+            chart_title="Доля расходов УК R1 в операционной выручке Estate",
+            subtitle="Доля расходов УК R1 в операционной выручке, %",
+            data_values=uk_share,
+            months=months,
+        )
+
+        # Переименовываем остальные листы UK Estate на 57 и т.д. по карте PPTX.
+        # В PPTX: EBITDA UK Estate = 57, Доля ФОТ = 58, ПланФакт = 59, Итог = 60.
 
     # --------------------------------------------------------
     # СОРТИРОВКА ЛИСТОВ ПО НОМЕРАМ СЛАЙДОВ ПРЕЗЕНТАЦИИ
