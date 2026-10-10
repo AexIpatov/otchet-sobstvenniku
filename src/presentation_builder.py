@@ -501,13 +501,27 @@ def _parse_debts(debts_path, months):
     print(f"[_parse_debts] шапка «Объект» с датами — строка {header_row}")
 
     # --- 2. Собираем {month: col} из дат в шапке ---
+    # ВАЖНО: в файле есть даты за 2026 и за 2027. Нам нужны ТОЛЬКО
+    # даты отчётного года. Иначе «январь 2027» перезапишет «январь 2026».
     month_col = {}
     for c in range(2, ws.max_column + 1):
         v = ws.cell(row=header_row, column=c).value
+        # Вариант 1: ячейка — настоящий datetime
         if isinstance(v, (_dt.datetime, _dt.date)):
-            if v.month in months:
+            if v.year == config.REPORT_YEAR and v.month in months:
                 month_col[v.month] = c
-    print(f"[_parse_debts] колонок с датами в шапке: {len(month_col)}")
+            continue
+        # Вариант 2: ячейка — текст вида «Январь 2026» или «январь 2026»
+        sv = str(v).strip().lower()
+        for m in months:
+            if m in month_col:
+                continue
+            month_name = _MONTHS_RU_LOWER[m]  # например, "январь"
+            if month_name in sv and str(config.REPORT_YEAR) in sv:
+                month_col[m] = c
+                break
+    print(f"[_parse_debts] колонок с датами в шапке (год "
+          f"{config.REPORT_YEAR}): {len(month_col)}")
     print(f"[_parse_debts]   month_col = {month_col}")
 
     if not month_col:
@@ -577,9 +591,20 @@ def _parse_debts(debts_path, months):
             if hc_dates_row is not None:
                 for c in range(2, ws.max_column + 1):
                     v = ws.cell(row=hc_dates_row, column=c).value
+                    # Вариант 1: datetime
                     if isinstance(v, (_dt.datetime, _dt.date)):
-                        if v.month in months:
+                        if v.year == config.REPORT_YEAR and v.month in months:
                             hc_month_col[v.month] = c
+                        continue
+                    # Вариант 2: текст «Январь 2026»
+                    sv = str(v).strip().lower()
+                    for m in months:
+                        if m in hc_month_col:
+                            continue
+                        month_name = _MONTHS_RU_LOWER[m]
+                        if month_name in sv and str(config.REPORT_YEAR) in sv:
+                            hc_month_col[m] = c
+                            break
             if not hc_month_col:
                 hc_month_col = month_col
 
