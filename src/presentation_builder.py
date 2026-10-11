@@ -2719,19 +2719,15 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # «Косвенные расходы» — там только Nomiqa, UK Estate, Unelma,
     # East-Восток. Поэтому постоянные для Latvia берём из БДиР
     # (строка «Косвенные расходы» + «Общепроизводственные»).
-    fixed_override = {}
-    if bdr_path and os.path.exists(bdr_path):
-        fixed_override["Latvia"] = _parse_bdr_fixed_costs(
-            bdr_path, "Latvia", months
-        )
-
-    # Подстраховка: БДиР 2026 неполный — в нём только 88 евро
-    # постоянных Latvia. Для ТБУ нужны реальные ~28 000.
-    # Если из БДиР пришло меньше 1000 — подставляем 28 000.
-    if (not fixed_override.get("Latvia")
-            or max((abs(v) for v in fixed_override["Latvia"].values()),
-                   default=0.0) < 1000.0):
-        fixed_override["Latvia"] = {m: 28000.0 for m in months}
+    # ВАЖНО: постоянные расходы Latvia берём НЕ из БДиР,
+    # потому что в текущем БДиР 2026 данные по Latvia неверные:
+    # в секции «Общепроизводственные» лежит ~65 777 евро,
+    # которые на самом деле к постоянным Latvia не относятся.
+    # До тех пор, пока заказчик не поправит БДиР,
+    # используем согласованную цифру 28 000 евро/мес.
+    fixed_override = {
+        "Latvia": {m: 28000.0 for m in months}
+    }
 
     breakeven_data = _collect_breakeven(rows, months,
                                         fixed_override=fixed_override)
