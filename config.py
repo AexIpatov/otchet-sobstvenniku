@@ -83,7 +83,7 @@ TEMPLATE_SHEET_NAME = "Лист1"
 
 # >>> В облаке DEBUG лучше выключить, чтобы не засорять логи.
 # Если что-то не работает — включи DEBUG=True и посмотри логи в Streamlit Cloud.
-DEBUG                = False
+DEBUG                = True
 POSTPROCESS_FORMULAS = True
 VERIFY_FORMULAS      = True
 

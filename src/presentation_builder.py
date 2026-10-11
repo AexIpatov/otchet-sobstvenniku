@@ -1014,6 +1014,9 @@ def _collect_breakeven(rows, months, fixed_override=None):
             var  = variable[u].get(m, 0.0) or 0.0
             fix  = fixed[u].get(m, 0.0) or 0.0
 
+            print(f"[ТБУ-ВНУТРИ] {u} м.{m}: "
+                  f"rev={rev:.2f}, var={var:.2f}, fix={fix:.2f}")
+
             md = rev - var
             if rev == 0 or md <= 0:
                 result[u][m] = 0.0
@@ -2745,8 +2748,15 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         print("[ТБУ-DEBUG] применяю заглушку 28000 для Latvia "
               "(реальные постоянные из БДиР меньше 1000)")
 
+    print(f"[ТБУ-DEBUG] перед вызовом _collect_breakeven: "
+          f"fixed_override['Latvia'] = {fixed_override.get('Latvia')}")
+
     breakeven_data = _collect_breakeven(rows, months,
                                         fixed_override=fixed_override)
+
+    print(f"[ТБУ-DEBUG] после _collect_breakeven: "
+          f"breakeven_data['Latvia'] = "
+          f"{breakeven_data.get('Latvia')}")
 
     print("[DEBUG: где реально встречается 'Latvia']")
     for _r, _lvl, _title, _vals in rows:
