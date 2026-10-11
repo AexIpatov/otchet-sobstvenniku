@@ -2534,6 +2534,105 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
                 months=months,
             )
 
+        # EBITDA юнита
+        if sl_ebitda:
+            if unit_name == "Latvia":
+                ant_objects = [
+                    "AN14 Антониас 14 (дом + парковка)",
+                ]
+                chaka_objects = [
+                    "AC89 Чака 89 (дом + парковка)",
+                ]
+                commercial_objects = [
+                    "D4 Парковка-Deglava4",
+                    "AC87 Гараж Чака",
+                    "B117 Бривибас, 117",
+                    "B78 Бривибас, 78",
+                    "C23 Цесу, 23",
+                    "DAR1_Darzauglu1",
+                    "DS1 Дзирнаву, 1",
+                    "G73 Гертрудес, 73",
+                    "H5 Хоспиталю",
+                    "MP1_Marupe",
+                    "MU3 - Mucenieku 3 - 4",
+                    "OZ1 Озолниеки",
+                    "SK3-Skunju 3",
+                    "UK_Latvia",
+                    "V22 К. Валдемара 22",
+                    "BRN_Brunieku",
+                ]
+
+                def _sum_objects(obj_list, key):
+                    result = {m: 0.0 for m in months}
+                    for obj_name in obj_list:
+                        obj = u["objects"].get(obj_name)
+                        if not obj:
+                            continue
+                        for m in months:
+                            result[m] += obj[key].get(m, 0.0) or 0.0
+                    return result
+
+                series_lat = [
+                    {
+                        "name": "Latvia",
+                        "color": _COLOR_LINE_RED,
+                        "net": u["net"].copy(),
+                        "revenue": u["revenue"].copy(),
+                    },
+                    {
+                        "name": "Антонияс",
+                        "color": "70AD47",
+                        "net": _sum_objects(ant_objects, "net"),
+                        "revenue": _sum_objects(ant_objects, "revenue"),
+                    },
+                    {
+                        "name": "Чака 89",
+                        "color": "FFC000",
+                        "net": _sum_objects(chaka_objects, "net"),
+                        "revenue": _sum_objects(chaka_objects, "revenue"),
+                    },
+                    {
+                        "name": "Коммерческие",
+                        "color": "4472C4",
+                        "net": _sum_objects(commercial_objects, "net"),
+                        "revenue": _sum_objects(commercial_objects, "revenue"),
+                    },
+                ]
+
+                series_data_05 = []
+                for s in series_lat:
+                    margin = {}
+                    for m in months:
+                        rev = s["revenue"].get(m, 0.0) or 0.0
+                        net = s["net"].get(m, 0.0) or 0.0
+                        margin[m] = (net / rev) if rev else 0.0
+                    series_data_05.append({
+                        "name": s["name"],
+                        "color": s["color"],
+                        "values": margin,
+                    })
+
+                _sheet_ebitda_multi(
+                    wb,
+                    sheet_title=_sheet_name_with_slide(
+                        sl_ebitda, f"EBITDA_{unit_name}"),
+                    chart_title="Рентабельность по чистой прибыли Latvia",
+                    subtitle="Рентабельность по ЧП (ЧП / Выручка × 100%), %",
+                    series_data=series_data_05,
+                    months=months,
+                )
+            else:
+                _sheet_ebitda(
+                    wb,
+                    sheet_title=_sheet_name_with_slide(
+                        sl_ebitda, f"EBITDA_{unit_name}"),
+                    chart_title=f"Операционная рентабельность (EBITDA margin) {unit_name}",
+                    subtitle=f"EBITDA margin {unit_name}, %",
+                    line_color=ebitda_color,
+                    data=u,
+                    months=months,
+                )
+
         # Доля ФОТ юнита
         if sl_fot:
             _sheet_fot(
