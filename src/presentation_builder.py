@@ -1151,6 +1151,67 @@ def _sheet_ebitda(wb, sheet_title, chart_title, subtitle,
 # ------------------------------------------------------------
 # Лист: Доля ФОТ (линия)
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# Лист: EBITDA margin — несколько линий (для слайда 05 Latvia)
+# ------------------------------------------------------------
+def _sheet_ebitda_multi(wb, sheet_title, chart_title, subtitle,
+                        series_data, months):
+    """
+    Лист с несколькими линиями рентабельности (EBITDA margin).
+    series_data — список: [{"name": ..., "color": ..., "values": {m: v}}]
+    """
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+    return ws
+
 def _sheet_fot(wb, sheet_title, chart_title, subtitle,
                line_color, data, months):
     ws = wb.create_sheet(sheet_title)
