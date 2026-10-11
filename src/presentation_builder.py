@@ -918,19 +918,18 @@ def _collect_breakeven(rows, months, fixed_override=None):
             cur_unit_level = None
             continue
 
-        # --- level 1: запоминаем строку-категорию ---
-        if lvl == 1:
-            cur_l1 = title
-            # сбрасываем юнит, если он был на level 1
-            if cur_unit_level == 1:
-                cur_unit = None
-                cur_unit_level = None
-            continue
-
-        # --- Встретили имя юнита ---
+        # --- ВАЖНО: сначала проверяем, не юнит ли это ---
+        # В секции «Выручка» строка «Latvia» лежит на level 1.
+        # Если сделать проверку `if lvl == 1` раньше, она «съест»
+        # эту строку, и выручка не соберётся.
         if title in _UNITS:
             cur_unit = title
             cur_unit_level = lvl
+            continue
+
+        # --- level 1: запоминаем строку-категорию ---
+        if lvl == 1:
+            cur_l1 = title
             continue
 
         # --- Если юнит не найден — пропускаем ---
