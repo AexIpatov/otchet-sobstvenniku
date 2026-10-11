@@ -855,64 +855,122 @@ def _sheet_roi(wb, sheet_title, chart_title, subtitle,
 
 def _collect_breakeven(rows, months):
     """
-    Возвращает {unit_name: {month: value}} — точку безубыточности (ТБУ)
-    по каждому юниту.
+    Возвращает {unit_name: {month: value}} — точку безубыточности (ТБУ).
 
-    Формула:
-      МД  = Выручка − Прямые производственные расходы
-      МД% = МД / Выручка
-      ТБУ = Постоянные (косвенные) расходы / МД%
+    Формула (по данным PPTX-эталона):
+      МД   = Выручка − Переменные производственные расходы
+      МД%  = МД / Выручка
+      ТБУ  = Постоянные / МД%
+
+    Постоянные = Косвенные расходы
+               + Общепроизводственные (level-1 строка внутри Косвенных)
+               + Прямые постоянные (если есть отдельная секция/строка)
 
     Если МД <= 0 или Выручка = 0 — ТБУ = 0.
     """
-    _SEC_REVENUE  = "Выручка"
-    _SEC_PROD     = "Производственные расходы"
-    _SEC_INDIRECT = "Косвенные расходы"
+    _SEC_REVENUE   = "Выручка"
+    _SEC_PROD      = "Производственные расходы"
+    _SEC_INDIRECT  = "Косвенные расходы"
+
+    # Внутри секции «Производственные расходы» переменные
+    # лежат под «· Прямые производственные».
+    _PROD_VARIABLE_LINE = "Прямые производственные"
+
+    # Внутри «Производственные расходы» могут быть постоянные
+    # — под «· Прямые постоянные».
+    _PROD_FIXED_LINE    = "Прямые постоянные"
+
+    # Внутри «Косвенные расходы» — постоянные: «· Общепроизводственные».
+    _INDIRECT_OVERHEAD_LINE = "Общепроизводственные"
 
     result   = {u: {m: 0.0 for m in months} for u in _UNITS}
     revenue  = {u: {m: 0.0 for m in months} for u in _UNITS}
-    direct   = {u: {m: 0.0 for m in months} for u in _UNITS}
-    indirect = {u: {m: 0.0 for m in months} for u in _UNITS}
+    variable = {u: {m: 0.0 for m in months} for u in _UNITS}
+    fixed    = {u: {m: 0.0 for m in months} for u in _UNITS}
 
     cur_section = None
-    cur_unit = None
+    cur_l1      = None   # последняя level-1 строка внутри секции
 
     for r, lvl, title, values in rows:
         # level 0 — переключение секции
         if lvl == 0:
             cur_section = title
-            cur_unit = None
+            cur_l1 = None
             continue
 
-        # Строка-юнит (например, «·· Latvia») — запоминаем имя
-        if title in _UNITS:
-            cur_unit = title
-            # Сразу копим в нужную корзину — юнит уникален в каждой секции
-            if cur_section == _SEC_REVENUE:
-                for m in months:
-                    revenue[cur_unit][m] += values.get(m, 0.0) or 0.0
-            elif cur_section == _SEC_PROD:
-                for m in months:
-                    direct[cur_unit][m] += abs(values.get(m, 0.0) or 0.0)
-            elif cur_section == _SEC_INDIRECT:
-                for m in months:
-                    indirect[cur_unit][m] += abs(values.get(m, 0.0) or 0.0)
+        # запоминаем level-1 строку (нужно для Общепроизводственные
+        # и Прямые производственные / Прямые постоянные)
+        if lvl == 1:
+            cur_l1 = title
+
+        # ---- 1. Выручка ----
+        # В секции «Выручка» юнит на level 1.
+        if cur_section == _SEC_REVENUE and title in _UNITS:
+            for m in months:
+                revenue[title][m] += values.get(m, 0.0) or 0.0
             continue
 
-    # Финальный расчёт ТБУ по каждому юниту
+        # ---- 2. Переменные производственные ----
+        # В секции «Производственные расходы» под «· Прямые производственные»
+        # юнит на level 2.
+        if (cur_section == _SEC_PROD
+                and title in _UNITS
+                and cur_l1 == _PROD_VARIABLE_LINE):
+            for m in months:
+                variable[title][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
+
+        # ---- 3. Прямые постоянные (если есть) ----
+        if (cur_section == _SEC_PROD
+                and title in _UNITS
+                and cur_l1 == _PROD_FIXED_LINE):
+            for m in months:
+                fixed[title][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
+
+        # ---- 4. Косвенные — Косвенные расходы (Административные, Коммерческие) ----
+        # В секции «Косвенные расходы» юнит на level 2 под любой
+        # level-1 категорией, КРОМЕ «Общепроизводственные» (её обрабатываем ниже).
+        if (cur_section == _SEC_INDIRECT
+                and title in _UNITS
+                and cur_l1 != _INDIRECT_OVERHEAD_LINE):
+            for m in months:
+                fixed[title][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
+
+        # ---- 5. Общепроизводственные (level 1 внутри Косвенных) ----
+        # Если внутри «Общепроизводственные» есть юнит на level 2 — берём его.
+        if (cur_section == _SEC_INDIRECT
+                and cur_l1 == _INDIRECT_OVERHEAD_LINE
+                and title in _UNITS):
+            for m in months:
+                fixed[title][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
+
+    # ---- Финальный расчёт ТБУ ----
     for u in _UNITS:
         for m in months:
             rev  = revenue[u].get(m, 0.0) or 0.0
-            dir_ = direct[u].get(m, 0.0) or 0.0
-            ind_ = indirect[u].get(m, 0.0) or 0.0
+            var  = variable[u].get(m, 0.0) or 0.0
+            fix  = fixed[u].get(m, 0.0) or 0.0
 
-            md = rev - dir_
+            md = rev - var
             if rev == 0 or md <= 0:
                 result[u][m] = 0.0
                 continue
 
             md_pct = md / rev
-            result[u][m] = ind_ / md_pct
+            result[u][m] = fix / md_pct
+
+    # Отладка — включается через config.DEBUG
+    if config.DEBUG:
+        for u in _UNITS:
+            for m in months:
+                print(f"[ТБУ] {u} м.{m}: "
+                      f"выручка={revenue[u][m]:.2f}, "
+                      f"перем={variable[u][m]:.2f}, "
+                      f"пост={fixed[u][m]:.2f}, "
+                      f"ТБУ={result[u][m]:.2f}")
 
     return result
 
@@ -2521,22 +2579,6 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # Это делается один раз, а используется ниже
     # при построении листов Сл06, Сл44, Сл63.
     breakeven_data = _collect_breakeven(rows, months)
-
-    print("[DEBUG ТБУ] breakeven_data:")
-    for _u, _vals in breakeven_data.items():
-        print(f"    {_u}: {_vals}")
-
-    print("[DEBUG секции и юниты Latvia/East-Восток]")
-    _cur_sec = None
-    for _r, _lvl, _title, _vals in rows:
-        if _lvl == 0:
-            _cur_sec = _title
-            print(f"  ===== СЕКЦИЯ: {_cur_sec!r} (стр.{_r}) =====")
-            continue
-        # Печатаем только если это юнит
-        if _title in _UNITS:
-            _sample = _vals.get(1, 0.0)
-            print(f"  стр.{_r} lvl={_lvl} секция={_cur_sec!r} юнит={_title!r} знач_янв={_sample}")
 
     print("[DEBUG: где реально встречается 'Latvia']")
     for _r, _lvl, _title, _vals in rows:
