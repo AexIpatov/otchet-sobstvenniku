@@ -1147,66 +1147,6 @@ def _sheet_ebitda(wb, sheet_title, chart_title, subtitle,
 
     ws.add_chart(chart, "E4")
 
-# ------------------------------------------------------------
-# Лист: EBITDA margin — несколько линий (для слайда 05 Latvia)
-# ------------------------------------------------------------
-def _sheet_ebitda_multi(wb, sheet_title, chart_title, subtitle,
-                        series_data, months):
-    """
-    Лист с несколькими линиями рентабельности (EBITDA margin).
-    series_data — список: [{"name": ..., "color": ..., "values": {m: v}}]
-    """
-    ws = wb.create_sheet(sheet_title)
-
-    _write_header(ws, chart_title, subtitle)
-
-    header_row = 4
-    headers = ["Месяц"] + [s["name"] for s in series_data]
-    rows_data = []
-    for m in months:
-        row = [_MONTHS_RU_CAP[m]]
-        for s in series_data:
-            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
-        rows_data.append(row)
-    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
-
-    cats = Reference(ws, min_col=1,
-                     min_row=header_row + 1,
-                     max_row=header_row + len(months))
-    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
-                         min_row=header_row,
-                         max_row=header_row + len(months))
-
-    chart = LineChart()
-    chart.add_data(data_ref, titles_from_data=True)
-    chart.set_categories(cats)
-    chart.title = chart_title
-    chart.width = 24
-    chart.height = 11
-    chart.x_axis.delete = False
-    chart.y_axis.delete = False
-    chart.y_axis.majorGridlines = None
-    chart.y_axis.numFmt = '0.0%'
-
-    for idx, s in enumerate(series_data):
-        if idx < len(chart.series):
-            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
-            chart.series[idx].graphicalProperties.line.width = 25000
-            chart.series[idx].smooth = True
-
-    chart.dLbls = DataLabelList()
-    chart.dLbls.showVal = True
-    chart.dLbls.showSerName = False
-    chart.dLbls.showCatName = False
-    chart.dLbls.showLegendKey = False
-    chart.dLbls.numFmt = '0.0%'
-    chart.dLbls.position = "t"
-
-    chart.legend.position = "t"
-    chart.legend.overlay = False
-    ws.add_chart(chart, "H4")
-
-    return ws
 
 # ------------------------------------------------------------
 # Лист: Доля ФОТ (линия)
@@ -2583,91 +2523,16 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
 
         # EBITDA юнита
         if sl_ebitda:
-            # ОСОБЫЙ СЛУЧАЙ: слайд 05 (Latvia) должен содержать 4 линии:
-            #   • Latvia целиком
-            #   • Антонияс
-            #   • Чака 89
-            #   • Коммерческие помещения LV
-            #
-            # Для всех остальных юнитов (East-Восток, Europe, Nomiqa,
-            # Unelma, UK Estate) — как и раньше, одна линия.
-            if unit_name == "Latvia":
-                series_lat = []
-
-                # 1) Latvia целиком (красная линия — как в шаблоне)
-                series_lat.append({
-                    "name": "Latvia",
-                    "color": _COLOR_LINE_RED,
-                    "values": u["net"].copy(),
-                    "revenue": u["revenue"].copy(),
-                })
-
-                # 2) Антонияс
-                ant = u["objects"].get("AN14 Антониас 14 (дом + парковка)")
-                if ant:
-                    series_lat.append({
-                        "name": "Антонияс",
-                        "color": "70AD47",   # зелёный
-                        "values": ant["net"].copy(),
-                        "revenue": ant["revenue"].copy(),
-                    })
-
-                # 3) Чака 89
-                chaka = u["objects"].get("AC89 Чака 89 (дом + парковка)")
-                if chaka:
-                    series_lat.append({
-                        "name": "Чака 89",
-                        "color": "FFC000",   # жёлтый
-                        "values": chaka["net"].copy(),
-                        "revenue": chaka["revenue"].copy(),
-                    })
-
-                # 4) Коммерческие помещения LV (виртуальный объект)
-                comm = u["objects"].get("Коммерческие помещения LV")
-                if comm:
-                    series_lat.append({
-                        "name": "Коммерческие помещения",
-                        "color": "4472C4",   # синий
-                        "values": comm["net"].copy(),
-                        "revenue": comm["revenue"].copy(),
-                    })
-
-                # Считаем маржу = ЧП / Выручка для каждой серии
-                for s in series_lat:
-                    margin = {}
-                    for m in months:
-                        rev = s["revenue"].get(m, 0.0) or 0.0
-                        net = s["values"].get(m, 0.0) or 0.0
-                        margin[m] = (net / rev) if rev else 0.0
-                    s["margin"] = margin
-
-                _sheet_ebitda_multi(
-                    wb,
-                    sheet_title=_sheet_name_with_slide(
-                        sl_ebitda, f"EBITDA_{unit_name}"),
-                    chart_title="Рентабельность по чистой прибыли Latvia",
-                    subtitle="Рентабельность по ЧП (ЧП / Выручка × 100%), %",
-                    series_data=[
-                        {
-                            "name": s["name"],
-                            "color": s["color"],
-                            "values": s["margin"],
-                        }
-                        for s in series_lat
-                    ],
-                    months=months,
-                )
-            else:
-                _sheet_ebitda(
-                    wb,
-                    sheet_title=_sheet_name_with_slide(
-                        sl_ebitda, f"EBITDA_{unit_name}"),
-                    chart_title=f"Операционная рентабельность (EBITDA margin) {unit_name}",
-                    subtitle=f"EBITDA margin {unit_name}, %",
-                    line_color=ebitda_color,
-                    data=u,
-                    months=months,
-                )
+            _sheet_ebitda(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    sl_ebitda, f"EBITDA_{unit_name}"),
+                chart_title=f"Операционная рентабельность (EBITDA margin) {unit_name}",
+                subtitle=f"EBITDA margin {unit_name}, %",
+                line_color=ebitda_color,
+                data=u,
+                months=months,
+            )
 
         # Доля ФОТ юнита
         if sl_fot:
