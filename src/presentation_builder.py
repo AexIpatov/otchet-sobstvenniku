@@ -2735,13 +2735,15 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
         print(f"[ТБУ-DEBUG] БДиР не найден — постоянные Latvia "
               f"останутся нулевыми, ТБУ будет 0")
 
-    # Подстраховка: если парсер не нашёл постоянные (все нули) —
-    # подставляем 28 000 (из PPTX-эталона).
+    # Подстраховка: БДиР 2026 неполный — в нём только 88 евро
+    # постоянных Latvia. Для ТБУ нужны реальные ~28 000.
+    # Если из БДиР пришло меньше 1000 — подставляем 28 000.
     if (not fixed_override.get("Latvia")
-            or not any(abs(v) > 0.01
-                       for v in fixed_override["Latvia"].values())):
+            or max((abs(v) for v in fixed_override["Latvia"].values()),
+                   default=0.0) < 1000.0):
         fixed_override["Latvia"] = {m: 28000.0 for m in months}
-        print("[ТБУ-DEBUG] применяю заглушку 28000 для Latvia")
+        print("[ТБУ-DEBUG] применяю заглушку 28000 для Latvia "
+              "(реальные постоянные из БДиР меньше 1000)")
 
     breakeven_data = _collect_breakeven(rows, months,
                                         fixed_override=fixed_override)
