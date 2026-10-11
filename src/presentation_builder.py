@@ -1003,6 +1003,11 @@ def _collect_breakeven(rows, months, fixed_override=None):
     # в секции «Косвенные расходы» — они есть только в БДиР.
     if fixed_override:
         for u in _UNITS:
+            if u in fixed_override:
+                for m in months:
+                    fixed[u][m] = fixed_override[u].get(m, 0.0) or 0.0
+
+    for u in _UNITS:
         for m in months:
             rev  = revenue[u].get(m, 0.0) or 0.0
             var  = variable[u].get(m, 0.0) or 0.0
