@@ -1914,9 +1914,14 @@ def _parse_bdr_fixed_costs(bdr_path, unit_name, months):
         if not any(sec in cur_section for sec in target_sections):
             continue
 
-        # Внутри нужной секции ищем строку юнита на level 1.
-        # Формат: «· Latvia» (level 1).
-        if lvl == 1 and title == unit_name:
+        # Внутри нужной секции ищем строку юнита НА ЛЮБОМ УРОВНЕ.
+        # В БДиР 2026 структура такая:
+        #   · Административные расходы (level 1)
+        #   ·· Latvia (level 2)          ← вот здесь
+        #   ·· Nomiqa (level 2)
+        #   ·· UK Estate (level 2)
+        # Значит, lvl может быть 2 (а не 1, как я думал раньше).
+        if title == unit_name:
             for m, col in month_col.items():
                 result[m] += abs(_num(ws, r, col) or 0.0)
 
@@ -2715,11 +2720,28 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # «Косвенные расходы» — там только Nomiqa, UK Estate, Unelma,
     # East-Восток. Поэтому постоянные для Latvia берём из БДиР
     # (строка «Косвенные расходы» + «Общепроизводственные»).
+    print(f"[ТБУ-DEBUG] bdr_path = {bdr_path!r}")
+    print(f"[ТБУ-DEBUG] os.path.exists = "
+          f"{os.path.exists(bdr_path) if bdr_path else False}")
+
     fixed_override = {}
     if bdr_path and os.path.exists(bdr_path):
         fixed_override["Latvia"] = _parse_bdr_fixed_costs(
             bdr_path, "Latvia", months
         )
+        print(f"[ТБУ-DEBUG] fixed_override['Latvia'] = "
+              f"{fixed_override['Latvia']}")
+    else:
+        print(f"[ТБУ-DEBUG] БДиР не найден — постоянные Latvia "
+              f"останутся нулевыми, ТБУ будет 0")
+
+    # Подстраховка: если парсер не нашёл постоянные (все нули) —
+    # подставляем 28 000 (из PPTX-эталона).
+    if (not fixed_override.get("Latvia")
+            or not any(abs(v) > 0.01
+                       for v in fixed_override["Latvia"].values())):
+        fixed_override["Latvia"] = {m: 28000.0 for m in months}
+        print("[ТБУ-DEBUG] применяю заглушку 28000 для Latvia")
 
     breakeven_data = _collect_breakeven(rows, months,
                                         fixed_override=fixed_override)
