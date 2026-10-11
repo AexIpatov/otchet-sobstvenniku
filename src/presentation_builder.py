@@ -859,24 +859,27 @@ def _collect_breakeven(rows, months, fixed_override=None):
 
     Методика: переменные = 0, ТБУ = постоянные расходы юнита.
 
-    Реальная структура ОПиУ:
+    Структура ОПиУ (важно!):
       Производственные расходы (level 0)
         · Прямые производственные (level 1)
           ·· Latvia (level 2)          ← юнит
-            ··· AN14 (level 3)         ← объект
-              ···· <статьи> (level 4)  ← суммируем всё рекурсивно
-
+            ··· AN14 (level 3)         ← объект — АГРЕГАТ
+              ···· <статьи> (level 4)
+            ··· AC89 (level 3)
+            ...
       Косвенные расходы (level 0)
         · Административные расходы (level 1)
-          ·· Latvia (level 2)
-        · Коммерческие расходы (level 1)
-          ·· Latvia (level 2)
+          ·· Latvia (level 2)          ← юнит
+            ··· SK3 (level 3)
+            ...
 
-    Для каждого юнита:
-      • находим его на ЛЮБОМ уровне внутри целевых секций,
-      • суммируем ВСЕ дочерние статьи рекурсивно (любой глубины),
-      • как только встретили строку с уровнем ≤ уровня юнита —
-        юнит закончился.
+    Для ТБУ суммируем ТОЛЬКО ПРЯМЫХ ДЕТЕЙ юнита (level = cur_level + 1),
+    потому что объект — это уже агрегат своих статей. Не суммируем
+    рекурсивно — иначе задвоим.
+
+    Блоки level 1, не являющиеся юнитами («Валовая прибыль по
+    направлениям», «Рентабельность по ВП1» и т.п.), сбрасывают
+    cur_unit, чтобы их строки не попали в fixed.
     """
     _SECTIONS = (
         "Производственные расходы",
@@ -888,51 +891,68 @@ def _collect_breakeven(rows, months, fixed_override=None):
     revenue = {u: {m: 0.0 for m in months} for u in _UNITS}
     fixed   = {u: {m: 0.0 for m in months} for u in _UNITS}
 
-    cur_section = None
-    cur_unit    = None
-    cur_level   = None
+    cur_section    = None
+    cur_unit       = None
+    cur_unit_level = None
 
     for r, lvl, title, values in rows:
         # --- level 0: смена секции ---
         if lvl == 0:
             cur_section = title
             cur_unit = None
-            cur_level = None
+            cur_unit_level = None
             continue
 
-        # --- внутри юнита: суммируем всё, что глубже ---
-        if cur_unit is not None:
-            if lvl <= cur_level:
-                cur_unit = None
-                cur_level = None
+        # --- level 1: юнит или не-юнит ---
+        if lvl == 1:
+            if title in _UNITS and cur_section in _SECTIONS:
+                cur_unit = title
+                cur_unit_level = 1
             else:
-                if cur_section in _SECTIONS:
-                    if config.DEBUG:
-                        v1 = values.get(1, 0.0) or 0.0
-                        print(f"[ТБУ-СТРОКА] юнит={cur_unit}, "
-                              f"секция={cur_section}, lvl={lvl}, "
-                              f"title={title!r}, январь={v1:.2f}")
-                    for m in months:
-                        fixed[cur_unit][m] += abs(values.get(m, 0.0) or 0.0)
-                continue
+                # «Прямые производственные», «Валовая прибыль по
+                # направлениям (ВП1)», «Рентабельность по ВП1»,
+                # «Валовая прибыль общая (ВП2)» — сбрасываем.
+                cur_unit = None
+                cur_unit_level = None
+            continue
 
-        # --- новая строка юнита (на любом уровне) ---
+        # --- юнит ниже level 1 (например, Latvia внутри
+        #     «Прямые производственные» — на level 2) ---
         if title in _UNITS:
             if cur_section in _SECTIONS or cur_section == "Выручка":
                 cur_unit = title
-                cur_level = lvl
+                cur_unit_level = lvl
             continue
+
+        if cur_unit is None:
+            continue
+
+        # --- вышли за пределы юнита ---
+        if lvl <= cur_unit_level:
+            cur_unit = None
+            cur_unit_level = None
+            continue
+
+        u = cur_unit
 
         # --- выручка: объекты юнита на level 2 внутри секции «Выручка» ---
         if cur_section == "Выручка":
-            if lvl == 1 and title in _UNITS:
-                cur_unit = title
-                cur_level = lvl
-                continue
-            if lvl == 2 and cur_unit is not None:
+            if lvl == cur_unit_level + 1:
                 for m in months:
-                    revenue[cur_unit][m] += values.get(m, 0.0) or 0.0
-                continue
+                    revenue[u][m] += values.get(m, 0.0) or 0.0
+            continue
+
+        # --- постоянные: только прямые дети юнита ---
+        if cur_section in _SECTIONS:
+            if lvl == cur_unit_level + 1:
+                if config.DEBUG:
+                    v1 = values.get(1, 0.0) or 0.0
+                    print(f"[ТБУ-СТРОКА] юнит={u}, "
+                          f"секция={cur_section}, lvl={lvl}, "
+                          f"title={title!r}, январь={v1:.2f}")
+                for m in months:
+                    fixed[u][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
 
     # --- финальный расчёт ТБУ ---
     for u in _UNITS:
