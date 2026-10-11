@@ -2584,19 +2584,6 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
 
         # EBITDA юнита
         if sl_ebitda:
-            _sheet_ebitda(
-                wb,
-                sheet_title=_sheet_name_with_slide(
-                    sl_ebitda, f"EBITDA_{unit_name}"),
-                chart_title=f"Операционная рентабельность (EBITDA margin) {unit_name}",
-                subtitle=f"EBITDA margin {unit_name}, %",
-                line_color=ebitda_color,
-                data=u,
-                months=months,
-            )
-
-        # EBITDA юнита
-        if sl_ebitda:
             if unit_name == "Latvia":
                 ant_objects = [
                     "AN14 Антониас 14 (дом + парковка)",
