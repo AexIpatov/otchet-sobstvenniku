@@ -853,101 +853,161 @@ def _sheet_roi(wb, sheet_title, chart_title, subtitle,
     chart.legend.overlay = False
     ws.add_chart(chart, "H4")
 
-def _collect_breakeven(rows, months):
+def _collect_breakeven(rows, months, fixed_override=None):
     """
     Возвращает {unit_name: {month: value}} — точку безубыточности (ТБУ).
 
-    Формула (по данным PPTX-эталона):
-      МД   = Выручка − Переменные производственные расходы
-      МД%  = МД / Выручка
-      ТБУ  = Постоянные / МД%
+    Реальная структура ОПиУ (см. КОНТЕКСТ ПРОЕКТА):
 
-    Постоянные = Косвенные расходы
-               + Общепроизводственные (level-1 строка внутри Косвенных)
-               + Прямые постоянные (если есть отдельная секция/строка)
+      Выручка (level 0)
+      · Latvia (level 1)                    ← папка-юнит
+      ·· AN14 Антониас 14 (level 2)         ← объект, здесь сумма выручки
+      ··· Выручка от аренды (level 3)       ← статья
 
-    Если МД <= 0 или Выручка = 0 — ТБУ = 0.
+      Производственные расходы (level 0)
+      · Прямые производственные (level 1)
+      ·· Latvia (level 2)                   ← папка-юнит
+      ··· AN14 (level 3)                    ← объект
+      ···· <статьи> (level 4)               ← переменные затраты
+
+      Косвенные расходы (level 0)
+      · Административные расходы (level 1)
+      ·· Latvia (level 2)                   ← папка-юнит, ЗДЕСЬ ПОСТОЯННЫЕ
+      ··· <статьи> (level 3)
+      · Общепроизводственные (level 1)      ← отдельная строка, ПОСТОЯННЫЕ
+      · Коммерческие расходы (level 1)
+      ·· Nomiqa (level 2)
+
+    Логика:
+      • Выручка юнита     = сумма level-2 строк в секции «Выручка» под этим юнитом.
+      • Переменные        = сумма level-4 статей под объектами level-3
+                            в секции «Производственные расходы» / «Прямые производственные».
+      • Постоянные        = сумма level-3 статей под юнитом level-2
+                            в секции «Косвенные расходы» (кроме «Общепроизводственные»)
+                          + сумма level-2 статей под «Общепроизводственные»
+                          + сумма level-4 статей под объектами level-3
+                            в секции «Производственные расходы» / «Прямые постоянные» (если есть).
+
+    ТБУ = Постоянные / (МД / Выручка),  МД = Выручка − Переменные.
+    Если МД <= 0 или Выручка = 0 → ТБУ = 0.
     """
-    _SEC_REVENUE   = "Выручка"
-    _SEC_PROD      = "Производственные расходы"
-    _SEC_INDIRECT  = "Косвенные расходы"
+    _SEC_REVENUE  = "Выручка"
+    _SEC_PROD     = "Производственные расходы"
+    _SEC_INDIRECT = "Косвенные расходы"
 
-    # Внутри секции «Производственные расходы» переменные
-    # лежат под «· Прямые производственные».
-    _PROD_VARIABLE_LINE = "Прямые производственные"
-
-    # Внутри «Производственные расходы» могут быть постоянные
-    # — под «· Прямые постоянные».
-    _PROD_FIXED_LINE    = "Прямые постоянные"
-
-    # Внутри «Косвенные расходы» — постоянные: «· Общепроизводственные».
-    _INDIRECT_OVERHEAD_LINE = "Общепроизводственные"
+    _L1_VARIABLE  = "Прямые производственные"
+    _L1_FIXED     = "Прямые постоянные"
+    _L1_OVERHEAD  = "Общепроизводственные"
 
     result   = {u: {m: 0.0 for m in months} for u in _UNITS}
     revenue  = {u: {m: 0.0 for m in months} for u in _UNITS}
     variable = {u: {m: 0.0 for m in months} for u in _UNITS}
     fixed    = {u: {m: 0.0 for m in months} for u in _UNITS}
 
-    cur_section = None
-    cur_l1      = None   # последняя level-1 строка внутри секции
+    cur_section = None       # текущая секция (level 0)
+    cur_l1      = None       # текущая level-1 строка внутри секции
+    cur_unit    = None       # текущий юнит (найден по title in _UNITS)
+    cur_unit_level = None    # на каком уровне встретился юнит
 
     for r, lvl, title, values in rows:
-        # level 0 — переключение секции
+        # --- level 0: смена секции ---
         if lvl == 0:
             cur_section = title
             cur_l1 = None
+            cur_unit = None
+            cur_unit_level = None
             continue
 
-        # запоминаем level-1 строку (нужно для Общепроизводственные
-        # и Прямые производственные / Прямые постоянные)
+        # --- level 1: запоминаем строку-категорию ---
         if lvl == 1:
             cur_l1 = title
-
-        # ---- 1. Выручка ----
-        # В секции «Выручка» юнит на level 1.
-        if cur_section == _SEC_REVENUE and title in _UNITS:
-            for m in months:
-                revenue[title][m] += values.get(m, 0.0) or 0.0
+            # сбрасываем юнит, если он был на level 1
+            if cur_unit_level == 1:
+                cur_unit = None
+                cur_unit_level = None
             continue
 
-        # ---- 2. Переменные производственные ----
-        # В секции «Производственные расходы» под «· Прямые производственные»
-        # юнит на level 2.
-        if (cur_section == _SEC_PROD
-                and title in _UNITS
-                and cur_l1 == _PROD_VARIABLE_LINE):
-            for m in months:
-                variable[title][m] += abs(values.get(m, 0.0) or 0.0)
+        # --- Встретили имя юнита ---
+        if title in _UNITS:
+            cur_unit = title
+            cur_unit_level = lvl
             continue
 
-        # ---- 3. Прямые постоянные (если есть) ----
-        if (cur_section == _SEC_PROD
-                and title in _UNITS
-                and cur_l1 == _PROD_FIXED_LINE):
-            for m in months:
-                fixed[title][m] += abs(values.get(m, 0.0) or 0.0)
+        # --- Если юнит не найден — пропускаем ---
+        if cur_unit is None:
             continue
 
-        # ---- 4. Косвенные — Косвенные расходы (Административные, Коммерческие) ----
-        # В секции «Косвенные расходы» юнит на level 2 под любой
-        # level-1 категорией, КРОМЕ «Общепроизводственные» (её обрабатываем ниже).
-        if (cur_section == _SEC_INDIRECT
-                and title in _UNITS
-                and cur_l1 != _INDIRECT_OVERHEAD_LINE):
-            for m in months:
-                fixed[title][m] += abs(values.get(m, 0.0) or 0.0)
+        # --- Если строка вышла за пределы юнита (level <= уровня юнита) ---
+        if lvl <= cur_unit_level:
+            cur_unit = None
+            cur_unit_level = None
             continue
 
-        # ---- 5. Общепроизводственные (level 1 внутри Косвенных) ----
-        # Если внутри «Общепроизводственные» есть юнит на level 2 — берём его.
-        if (cur_section == _SEC_INDIRECT
-                and cur_l1 == _INDIRECT_OVERHEAD_LINE
-                and title in _UNITS):
-            for m in months:
-                fixed[title][m] += abs(values.get(m, 0.0) or 0.0)
+        u = cur_unit
+
+        # ============================================================
+        # 1. ВЫРУЧКА
+        # ============================================================
+        # В секции «Выручка» объекты лежат на level 2 (Latvia level 1,
+        # объект level 2). Суммируем их.
+        if cur_section == _SEC_REVENUE:
+            if lvl == 2:
+                for m in months:
+                    revenue[u][m] += values.get(m, 0.0) or 0.0
+            continue
+
+        # ============================================================
+        # 2. ПЕРЕМЕННЫЕ (Производственные / Прямые производственные)
+        # ============================================================
+        if cur_section == _SEC_PROD and cur_l1 == _L1_VARIABLE:
+            # юнит на level 2, объект на level 3, статьи на level 4
+            if lvl == 4:
+                for m in months:
+                    variable[u][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
+
+        # ============================================================
+        # 3. ПРЯМЫЕ ПОСТОЯННЫЕ (Производственные / Прямые постоянные)
+        # ============================================================
+        if cur_section == _SEC_PROD and cur_l1 == _L1_FIXED:
+            if lvl == 4:
+                for m in months:
+                    fixed[u][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
+
+        # ============================================================
+        # 4. ПОСТОЯННЫЕ: Косвенные / Административные (и пр. кроме Общепроизв.)
+        # ============================================================
+        if cur_section == _SEC_INDIRECT and cur_l1 != _L1_OVERHEAD:
+            # юнит на level 2, статьи на level 3
+            if lvl == 3:
+                for m in months:
+                    fixed[u][m] += abs(values.get(m, 0.0) or 0.0)
+            continue
+
+        # ============================================================
+        # 5. ПОСТОЯННЫЕ: Общепроизводственные (отдельная строка level 1)
+        # ============================================================
+        if cur_section == _SEC_INDIRECT and cur_l1 == _L1_OVERHEAD:
+            # структура: · Общепроизводственные (level 1)
+            #             ·· Latvia (level 2)   ← юнит
+            #             ··· <статьи> (level 3)
+            if lvl == 3:
+                for m in months:
+                    fixed[u][m] += abs(values.get(m, 0.0) or 0.0)
             continue
 
     # ---- Финальный расчёт ТБУ ----
+    # Если для юнита переданы постоянные из внешнего источника (БДиР),
+    # они ПЕРЕЗАПИСЫВАЮТ то, что удалось собрать из ОПиУ.
+    # Это нужно для Latvia: в ОПиУ у неё нет постоянных расходов
+    # в секции «Косвенные расходы» — они есть только в БДиР.
+    if fixed_override:
+        for u in _UNITS:
+            if u in fixed_override:
+                for m in months:
+                    fixed[u][m] = fixed_override[u].get(m, 0.0) or 0.0
+
     for u in _UNITS:
         for m in months:
             rev  = revenue[u].get(m, 0.0) or 0.0
@@ -962,7 +1022,6 @@ def _collect_breakeven(rows, months):
             md_pct = md / rev
             result[u][m] = fix / md_pct
 
-    # Отладка — включается через config.DEBUG
     if config.DEBUG:
         for u in _UNITS:
             for m in months:
@@ -1790,6 +1849,79 @@ def _parse_bdr_plan(bdr_path, unit_name, months):
 
     return result
 
+def _parse_bdr_fixed_costs(bdr_path, unit_name, months):
+    """
+    Читает постоянные расходы юнита из БДиР.
+
+    Что берём:
+      • секция «Косвенные расходы» → строка «· <Юнит>» (level 1)
+      • секция «Общепроизводственные» → строка «· <Юнит>» (level 1)
+      • секция «Прямые постоянные» (если есть) → «· <Юнит>»
+
+    Значения берём по модулю.
+
+    Возвращает {month: value} — суммарные постоянные расходы юнита.
+    """
+    result = {m: 0.0 for m in months}
+    if not bdr_path or not os.path.exists(bdr_path):
+        return result
+
+    wb = openpyxl.load_workbook(bdr_path, data_only=True)
+    ws = wb.active
+
+    # Шапка с месяцами
+    header_row = None
+    for r in range(1, 6):
+        hits = 0
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            sv = str(v).lower()
+            if any(m in sv for m in _MONTHS_RU_LOWER.values()):
+                hits += 1
+        if hits >= 3:
+            header_row = r
+            break
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    # Секции БДиР, в которых лежат постоянные.
+    # Названия могут немного отличаться — ловим по ключевым словам.
+    target_sections = (
+        "косвенные расходы",
+        "общепроизводственные",
+        "прямые постоянные",
+    )
+
+    cur_section = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+
+        if lvl == 0:
+            cur_section = title.lower()
+            continue
+
+        if cur_section is None:
+            continue
+
+        if not any(sec in cur_section for sec in target_sections):
+            continue
+
+        # Внутри нужной секции ищем строку юнита на level 1.
+        # Формат: «· Latvia» (level 1).
+        if lvl == 1 and title == unit_name:
+            for m, col in month_col.items():
+                result[m] += abs(_num(ws, r, col) or 0.0)
+
+    return result
+
 def _parse_bdr_plan_object(bdr_path, unit_name, object_name, months):
     """
     Ищет план ЧП ОБЪЕКТА в БДиР.
@@ -2578,7 +2710,19 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # Собираем данные для точек безубыточности.
     # Это делается один раз, а используется ниже
     # при построении листов Сл06, Сл44, Сл63.
-    breakeven_data = _collect_breakeven(rows, months)
+    #
+    # ВАЖНО: у Latvia в ОПиУ НЕТ постоянных расходов в секции
+    # «Косвенные расходы» — там только Nomiqa, UK Estate, Unelma,
+    # East-Восток. Поэтому постоянные для Latvia берём из БДиР
+    # (строка «Косвенные расходы» + «Общепроизводственные»).
+    fixed_override = {}
+    if bdr_path and os.path.exists(bdr_path):
+        fixed_override["Latvia"] = _parse_bdr_fixed_costs(
+            bdr_path, "Latvia", months
+        )
+
+    breakeven_data = _collect_breakeven(rows, months,
+                                        fixed_override=fixed_override)
 
     print("[DEBUG: где реально встречается 'Latvia']")
     for _r, _lvl, _title, _vals in rows:
