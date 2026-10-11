@@ -855,69 +855,64 @@ def _sheet_roi(wb, sheet_title, chart_title, subtitle,
 
 def _collect_breakeven(rows, months):
     """
-    Возвращает {unit_name: {month: value}} — точку безубыточности
+    Возвращает {unit_name: {month: value}} — точку безубыточности (ТБУ)
     по каждому юниту.
 
-    Логика:
-      ТБУ = |Производственные расходы| + |Косвенные расходы|.
+    Формула:
+      МД  = Выручка − Прямые производственные расходы
+      МД% = МД / Выручка
+      ТБУ = Постоянные (косвенные) расходы / МД%
 
-    ВАЖНО: в ОПиУ секции «Производственные расходы» и «Косвенные расходы»
-    имеют РАЗНУЮ структуру вложенности:
-
-      Производственные расходы             ← level 0
-      · Прямые производственные            ← level 1 (промежуточный)
-      ·· Latvia                            ← level 2 (юнит)
-      ··· AN14 …                           ← level 3 (объект)
-      ···· 1.2.10 Коммунальные платежи     ← level 4 (статья)
-
-      Косвенные расходы                    ← level 0
-      · Административные расходы           ← level 1 (категория)
-      ·· Latvia                            ← level 2 (юнит)
-      ··· AN14 …                           ← level 3 (объект)
-
-    Поэтому ищем юнит по ИМЕНИ (входит в _UNITS), а не по уровню.
-    Учитываем только строку-объект, но НЕ его дочерние статьи,
-    чтобы не удвоить сумму.
+    Если МД <= 0 или Выручка = 0 — ТБУ = 0.
     """
-    _SECTION_PROD = "Производственные расходы"
-    _SECTION_INDIRECT = "Косвенные расходы"
+    _SEC_REVENUE  = "Выручка"
+    _SEC_PROD     = "Производственные расходы"
+    _SEC_INDIRECT = "Косвенные расходы"
 
-    result = {u: {m: 0.0 for m in months} for u in _UNITS}
+    result   = {u: {m: 0.0 for m in months} for u in _UNITS}
+    revenue  = {u: {m: 0.0 for m in months} for u in _UNITS}
+    direct   = {u: {m: 0.0 for m in months} for u in _UNITS}
+    indirect = {u: {m: 0.0 for m in months} for u in _UNITS}
 
     cur_section = None
     cur_unit = None
-    cur_unit_level = None
 
     for r, lvl, title, values in rows:
         # level 0 — переключение секции
         if lvl == 0:
             cur_section = title
             cur_unit = None
-            cur_unit_level = None
             continue
 
-        # Ищем юнит ПО ИМЕНИ (не по уровню)
-        # Обновляем cur_unit, если это имя из _UNITS.
+        # Строка-юнит (например, «·· Latvia») — запоминаем имя
         if title in _UNITS:
             cur_unit = title
-            cur_unit_level = lvl
+            # Сразу копим в нужную корзину — юнит уникален в каждой секции
+            if cur_section == _SEC_REVENUE:
+                for m in months:
+                    revenue[cur_unit][m] += values.get(m, 0.0) or 0.0
+            elif cur_section == _SEC_PROD:
+                for m in months:
+                    direct[cur_unit][m] += abs(values.get(m, 0.0) or 0.0)
+            elif cur_section == _SEC_INDIRECT:
+                for m in months:
+                    indirect[cur_unit][m] += abs(values.get(m, 0.0) or 0.0)
             continue
 
-        # Работаем только в нужных секциях и внутри какого-то юнита
-        if cur_section not in (_SECTION_PROD, _SECTION_INDIRECT):
-            continue
-        if cur_unit is None:
-            continue
-
-        # Берём только СЛЕДУЮЩИЙ уровень после юнита
-        # (это объект). Не заходим глубже — иначе задвоим.
-        if lvl != cur_unit_level + 1:
-            continue
-
-        # Складываем по модулю
+    # Финальный расчёт ТБУ по каждому юниту
+    for u in _UNITS:
         for m in months:
-            v = values.get(m, 0.0) or 0.0
-            result[cur_unit][m] += abs(v)
+            rev  = revenue[u].get(m, 0.0) or 0.0
+            dir_ = direct[u].get(m, 0.0) or 0.0
+            ind_ = indirect[u].get(m, 0.0) or 0.0
+
+            md = rev - dir_
+            if rev == 0 or md <= 0:
+                result[u][m] = 0.0
+                continue
+
+            md_pct = md / rev
+            result[u][m] = ind_ / md_pct
 
     return result
 
