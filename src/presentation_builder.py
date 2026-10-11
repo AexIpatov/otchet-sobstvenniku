@@ -929,6 +929,10 @@ def _collect_breakeven(rows, months, fixed_override=None):
             # НЕПОСРЕДСТВЕННО под юнитом (на 1 уровень ниже),
             # чтобы избежать двойного счёта.
             if lvl == cur_unit_level + 1:
+                if config.DEBUG:
+                    v1 = values.get(1, 0.0) or 0.0
+                    print(f"[ТБУ-СТРОКА] юнит={u}, секция={cur_section}, "
+                          f"lvl={lvl}, title={title!r}, январь={v1:.2f}")
                 for m in months:
                     fixed[u][m] += abs(values.get(m, 0.0) or 0.0)
             continue
