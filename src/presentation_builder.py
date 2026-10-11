@@ -2266,24 +2266,60 @@ def _collect_dds(odds_path, unit_name, months):
     if unit_row is None:
         return result
 
-    # 3) Берём следующие две строки с числами сразу после юнита.
-    #    В ОДДС у Latvia:
-    #      строка N   — юнит «Latvia»
-    #      строка N+1 — АГРЕГАТ ВЫБЫТИЙ (отрицательные числа)
-    #      строка N+2 — АГРЕГАТ ПОСТУПЛЕНИЙ (положительные числа)
+    # 3) Определяем, где лежат Поступления, а где Списания.
     #
-    # ВАЖНО: порядок может отличаться, но по факту в файле
-    # сначала идут выбытия (со знаком минус), потом поступления.
-    # Поэтому берем N+1 как выбытия (по модулю), N+2 как поступления.
+    # В файле ОДДС возможны ДВА варианта структуры:
+    #
+    # ВАРИАНТ A (актуальный):
+    #   строка N     — юнит «Latvia» — в этой же строке АГРЕГАТ ПОСТУПЛЕНИЙ
+    #                  (положительные числа, зелёные)
+    #   строка N+1   — пустая в столбце A — АГРЕГАТ СПИСАНИЙ
+    #                  (отрицательные числа)
+    #
+    # ВАРИАНТ B (устаревший):
+    #   строка N     — юнит «Latvia» (0)
+    #   строка N+1   — АГРЕГАТ СПИСАНИЙ (отрицательные)
+    #   строка N+2   — АГРЕГАТ ПОСТУПЛЕНИЙ (положительные)
+    #
+    # Определяем вариант по знаку значения в строке юнита:
+    #   если там есть положительные числа → это ПОСТУПЛЕНИЯ (вариант A);
+    #   иначе → вариант B.
 
-    outflow_row = unit_row + 1
-    inflow_row = unit_row + 2
-
+    # Сначала пробуем прочитать саму строку юнита.
+    unit_values = {}
     for m, col in month_col.items():
-        # Выбытия (по модулю, чтобы были положительными)
-        result["outflow"][m] = abs(_num(ws, outflow_row, col) or 0.0)
-        # Поступления
-        result["inflow"][m] = _num(ws, inflow_row, col) or 0.0
+        unit_values[m] = _num(ws, unit_row, col) or 0.0
+
+    # Есть ли в строке юнита положительные значения?
+    has_positive_in_unit_row = any(v > 0 for v in unit_values.values())
+
+    if has_positive_in_unit_row:
+        # ВАРИАНТ A: строка юнита = Поступления, следующая строка = Списания.
+        inflow_row  = unit_row
+        outflow_row = unit_row + 1
+
+        for m, col in month_col.items():
+            result["inflow"][m]  = _num(ws, inflow_row, col) or 0.0
+            result["outflow"][m] = abs(_num(ws, outflow_row, col) or 0.0)
+
+        if config.DEBUG:
+            print(f"[DDS] {unit_name}: вариант A "
+                  f"(строка {unit_row} = Поступления, "
+                  f"строка {outflow_row} = Списания)")
+
+    else:
+        # ВАРИАНТ B: строка N+1 = Списания, строка N+2 = Поступления.
+        outflow_row = unit_row + 1
+        inflow_row  = unit_row + 2
+
+        for m, col in month_col.items():
+            result["outflow"][m] = abs(_num(ws, outflow_row, col) or 0.0)
+            result["inflow"][m]  = _num(ws, inflow_row, col) or 0.0
+
+        if config.DEBUG:
+            print(f"[DDS] {unit_name}: вариант B "
+                  f"(строка {outflow_row} = Списания, "
+                  f"строка {inflow_row} = Поступления)")
 
     return result
 
