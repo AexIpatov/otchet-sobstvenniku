@@ -857,22 +857,12 @@ def _collect_breakeven(rows, months, fixed_override=None):
     """
     Возвращает {unit_name: {month: value}} — точку безубыточности (ТБУ).
 
-    Методика (согласована с заказчиком):
-
-      Переменные расходы = 0.
-      (В ОПиУ заказчика все «Переменные» — нули,
-       а «Производственные расходы» — это на самом деле постоянные.)
-
-      Маржинальный доход      = Выручка − Переменные = Выручка
-      Рентабельность по МД    = МД / Выручка × 100% = 100%
-      Постоянные              = сумма всех расходов юнита
-                                (Производственные + Косвенные + Коммерческие)
-      ТБУ                     = Постоянные / (МД / Выручка)
-                              = Постоянные / 1
-                              = Постоянные
-
-    Если Выручка = 0 → ТБУ = 0 (чтобы не «светить» постоянные
-    в листе ТБУ там, где бизнеса ещё нет).
+    Методика:
+      Переменные = 0.
+      Постоянные = сумма всех статей расходов юнита
+                   из секций «Производственные расходы»,
+                   «Косвенные расходы», «Коммерческие расходы».
+      ТБУ        = Постоянные (при МД/Выручка = 1).
     """
     _SECTIONS = (
         "Производственные расходы",
@@ -884,28 +874,44 @@ def _collect_breakeven(rows, months, fixed_override=None):
     revenue  = {u: {m: 0.0 for m in months} for u in _UNITS}
     fixed    = {u: {m: 0.0 for m in months} for u in _UNITS}
 
-    cur_section = None
-    cur_unit    = None
+    cur_section    = None
+    cur_unit       = None
     cur_unit_level = None
 
     for r, lvl, title, values in rows:
-        # --- level 0: смена секции ---
+        # level 0 — смена секции
         if lvl == 0:
             cur_section = title
             cur_unit = None
             cur_unit_level = None
             continue
 
-        # --- юнит (в любой секции) ---
+        # level 1 — либо юнит, либо новая подкатегория/агрегат.
+        # В любом случае сбрасываем «текущий юнит»: следующий юнит
+        # должен появиться уже внутри новой ветки.
+        if lvl == 1:
+            # Если это один из наших юнитов — запоминаем.
+            if title in _UNITS:
+                cur_unit = title
+                cur_unit_level = 1
+            else:
+                # Это не юнит, а строка-заголовок блока
+                # («Прямые производственные», «Валовая прибыль», …)
+                cur_unit = None
+                cur_unit_level = None
+            continue
+
+        # Ищем юнит на любом уровне (кроме 0 и 1, которые уже обработали)
         if title in _UNITS:
             cur_unit = title
             cur_unit_level = lvl
             continue
 
+        # Если юнит не установлен — пропускаем
         if cur_unit is None:
             continue
 
-        # --- вышли за пределы юнита ---
+        # Вышли за пределы юнита
         if lvl <= cur_unit_level:
             cur_unit = None
             cur_unit_level = None
@@ -913,37 +919,31 @@ def _collect_breakeven(rows, months, fixed_override=None):
 
         u = cur_unit
 
-        # --- выручка: секция «Выручка», объекты на level 2 ---
+        # Выручка — только в секции «Выручка», объекты на level 2
         if cur_section == "Выручка":
             if lvl == 2:
                 for m in months:
                     revenue[u][m] += values.get(m, 0.0) or 0.0
             continue
 
-        # --- все остальные расходы юнита: суммируем по модулю,
-        #     чтобы получить постоянные. Берём только level-1 строки
-        #     «под юнитом» на любом уровне, чтобы не задвоить
-        #     вложенные подстатьи. ---
+        # Постоянные — только в целевых секциях и только
+        # для «прямых детей» юнита.
         if cur_section in _SECTIONS:
-            # Суммируем только те строки, которые лежат
-            # НЕПОСРЕДСТВЕННО под юнитом (на 1 уровень ниже),
-            # чтобы избежать двойного счёта.
             if lvl == cur_unit_level + 1:
                 if config.DEBUG:
                     v1 = values.get(1, 0.0) or 0.0
-                    print(f"[ТБУ-СТРОКА] юнит={u}, секция={cur_section}, "
-                          f"lvl={lvl}, title={title!r}, январь={v1:.2f}")
+                    print(f"[ТБУ-СТРОКА] юнит={u}, "
+                          f"секция={cur_section}, lvl={lvl}, "
+                          f"title={title!r}, январь={v1:.2f}")
                 for m in months:
                     fixed[u][m] += abs(values.get(m, 0.0) or 0.0)
             continue
 
-    # --- Финальный расчёт ТБУ ---
+    # Финальный расчёт ТБУ
     for u in _UNITS:
         for m in months:
             rev = revenue[u].get(m, 0.0) or 0.0
             fix = fixed[u].get(m, 0.0) or 0.0
-
-            # Переменных нет → МД/Выручка = 1 → ТБУ = Постоянные
             if rev == 0:
                 result[u][m] = 0.0
             else:
