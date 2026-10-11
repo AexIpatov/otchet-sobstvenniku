@@ -1003,18 +1003,10 @@ def _collect_breakeven(rows, months, fixed_override=None):
     # в секции «Косвенные расходы» — они есть только в БДиР.
     if fixed_override:
         for u in _UNITS:
-            if u in fixed_override:
-                for m in months:
-                    fixed[u][m] = fixed_override[u].get(m, 0.0) or 0.0
-
-    for u in _UNITS:
         for m in months:
             rev  = revenue[u].get(m, 0.0) or 0.0
             var  = variable[u].get(m, 0.0) or 0.0
             fix  = fixed[u].get(m, 0.0) or 0.0
-
-            print(f"[ТБУ-ВНУТРИ] {u} м.{m}: "
-                  f"rev={rev:.2f}, var={var:.2f}, fix={fix:.2f}")
 
             md = rev - var
             if rev == 0 or md <= 0:
@@ -2722,20 +2714,11 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # «Косвенные расходы» — там только Nomiqa, UK Estate, Unelma,
     # East-Восток. Поэтому постоянные для Latvia берём из БДиР
     # (строка «Косвенные расходы» + «Общепроизводственные»).
-    print(f"[ТБУ-DEBUG] bdr_path = {bdr_path!r}")
-    print(f"[ТБУ-DEBUG] os.path.exists = "
-          f"{os.path.exists(bdr_path) if bdr_path else False}")
-
     fixed_override = {}
     if bdr_path and os.path.exists(bdr_path):
         fixed_override["Latvia"] = _parse_bdr_fixed_costs(
             bdr_path, "Latvia", months
         )
-        print(f"[ТБУ-DEBUG] fixed_override['Latvia'] = "
-              f"{fixed_override['Latvia']}")
-    else:
-        print(f"[ТБУ-DEBUG] БДиР не найден — постоянные Latvia "
-              f"останутся нулевыми, ТБУ будет 0")
 
     # Подстраховка: БДиР 2026 неполный — в нём только 88 евро
     # постоянных Latvia. Для ТБУ нужны реальные ~28 000.
@@ -2744,27 +2727,9 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
             or max((abs(v) for v in fixed_override["Latvia"].values()),
                    default=0.0) < 1000.0):
         fixed_override["Latvia"] = {m: 28000.0 for m in months}
-        print("[ТБУ-DEBUG] применяю заглушку 28000 для Latvia "
-              "(реальные постоянные из БДиР меньше 1000)")
-
-    print(f"[ТБУ-DEBUG] перед вызовом _collect_breakeven: "
-          f"fixed_override['Latvia'] = {fixed_override.get('Latvia')}")
 
     breakeven_data = _collect_breakeven(rows, months,
                                         fixed_override=fixed_override)
-
-    print(f"[ТБУ-DEBUG] после _collect_breakeven: "
-          f"breakeven_data['Latvia'] = "
-          f"{breakeven_data.get('Latvia')}")
-
-    print("[DEBUG: где реально встречается 'Latvia']")
-    for _r, _lvl, _title, _vals in rows:
-        if _title == "Latvia":
-            print(f"  стр.{_r} lvl={_lvl} title={_title!r}")
-    print("[DEBUG: полное имя юнита в выручке]")
-    for _r, _lvl, _title, _vals in rows[:10]:
-        if _lvl > 0 and _title not in _UNITS:
-            print(f"  стр.{_r} lvl={_lvl} {_title!r} (len={len(_title)})")
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
