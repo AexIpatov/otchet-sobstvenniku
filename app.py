@@ -22,7 +22,7 @@ import streamlit as st
 
 import config
 from src.report_builder import build_all_reports, build_report
-from src.presentation_builder import build_presentation_data
+from src.presentation_builder_v2 import build_presentation_data
 
 
 # ============================================================
