@@ -2525,9 +2525,27 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     print("[DEBUG ТБУ] breakeven_data:")
     for _u, _vals in breakeven_data.items():
         print(f"    {_u}: {_vals}")
-    print("[DEBUG строки ОПиУ — первые 80]")
-    for _r, _lvl, _title, _vals in rows[:80]:
-        print(f"  стр.{_r} lvl={_lvl} {_title!r}")
+
+    print("[DEBUG секции и юниты Latvia/East-Восток]")
+    _cur_sec = None
+    for _r, _lvl, _title, _vals in rows:
+        if _lvl == 0:
+            _cur_sec = _title
+            print(f"  ===== СЕКЦИЯ: {_cur_sec!r} (стр.{_r}) =====")
+            continue
+        # Печатаем только если это юнит
+        if _title in _UNITS:
+            _sample = _vals.get(1, 0.0)
+            print(f"  стр.{_r} lvl={_lvl} секция={_cur_sec!r} юнит={_title!r} знач_янв={_sample}")
+
+    print("[DEBUG: где реально встречается 'Latvia']")
+    for _r, _lvl, _title, _vals in rows:
+        if _title == "Latvia":
+            print(f"  стр.{_r} lvl={_lvl} title={_title!r}")
+    print("[DEBUG: полное имя юнита в выручке]")
+    for _r, _lvl, _title, _vals in rows[:10]:
+        if _lvl > 0 and _title not in _UNITS:
+            print(f"  стр.{_r} lvl={_lvl} {_title!r} (len={len(_title)})")
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
