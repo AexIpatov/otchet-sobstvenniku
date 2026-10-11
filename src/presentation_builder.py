@@ -2522,6 +2522,13 @@ def build_presentation_data(opiu_path, bdr_path, forecast_path,
     # при построении листов Сл06, Сл44, Сл63.
     breakeven_data = _collect_breakeven(rows, months)
 
+    print("[DEBUG ТБУ] breakeven_data:")
+    for _u, _vals in breakeven_data.items():
+        print(f"    {_u}: {_vals}")
+    print("[DEBUG строки ОПиУ — первые 80]")
+    for _r, _lvl, _title, _vals in rows[:80]:
+        print(f"  стр.{_r} lvl={_lvl} {_title!r}")
+
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
