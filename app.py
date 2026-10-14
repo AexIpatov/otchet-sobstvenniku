@@ -2,11 +2,13 @@
 # ============================================================
 # Streamlit-интерфейс «Отчет для собственника» (облачная версия).
 #
-# Две вкладки:
-#   1) 📊 Отчёты для собственника — 3 отчёта (Estate, Unelma, Nomiqa).
-#   2) 📈 Диаграммы для презентации — Excel с 80+ диаграммами.
-#
-# В каждой вкладке — крупные блоки загрузки файлов.
+# Дизайн:
+#   • Крупный заголовок с градиентом.
+#   • Две большие овальные вкладки.
+#   • Декоративный SVG-фон.
+#   • Крупные блоки загрузки файлов с форматом.
+#   • Выбор периода — под заголовком.
+#   • Кнопка «Выйти» — в правом верхнем углу.
 # ============================================================
 
 import os
@@ -29,7 +31,7 @@ st.set_page_config(
     page_title="Отчет для собственника",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",   # сайдбар не нужен
 )
 
 
@@ -62,7 +64,8 @@ def _login_form():
             box-shadow: 0 12px 40px rgba(0,0,0,0.4);
         }
         .login-title {
-            font-size: 1.6rem; font-weight: 800;
+            font-family: 'Playfair Display', serif;
+            font-size: 2rem; font-weight: 900;
             background: linear-gradient(90deg, #60a5fa 0%, #22d3ee 100%);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
             text-align: center; margin-bottom: 0.3rem;
@@ -113,41 +116,251 @@ current_user = require_login()
 
 
 # ============================================================
-# КАСТОМНЫЙ CSS
+# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: HTML-БЛОК ЗАГРУЗКИ
+# ============================================================
+
+def _upload_block_html(icon, title, desc, format_hint):
+    """Крупная карточка-заголовок для блока загрузки файлов."""
+    return f"""
+    <div class="upload-block">
+        <div class="upload-block-title">
+            <span class="upload-block-icon">{icon}</span>
+            <span>{title}</span>
+        </div>
+        <div class="upload-block-desc">{desc}</div>
+        <div class="upload-block-format">
+            <span class="format-label">Формат файла:</span>
+            <code class="format-code">{format_hint}</code>
+        </div>
+    </div>
+    """
+
+
+def _save_uploaded(files, target_dir):
+    if not files:
+        return 0
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    for f in files:
+        try:
+            path = target_dir / f.name
+            with open(path, "wb") as out:
+                out.write(f.getbuffer())
+            saved += 1
+        except Exception as e:
+            st.warning(f"Не удалось сохранить {f.name}: {e}")
+    return saved
+
+
+def _file_status_table():
+    result = {}
+    for report_key in ("Estate", "Unelma", "Nomiqa"):
+        try:
+            missing = config.check_inputs(report_key)
+        except Exception as e:
+            result[report_key] = [("error", Path(str(e)))]
+            continue
+        flat = []
+        for k in ("template", "opiu_prev", "opiu_cur", "bdr",
+                  "forecast", "vat"):
+            for p in missing.get(k, []):
+                flat.append((k, Path(p)))
+        result[report_key] = flat
+    return result
+
+
+# ============================================================
+# CSS
 # ============================================================
 
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800;900&family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&display=swap');
 
     html, body, [class*="css"] {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-family: 'Manrope', 'Inter', -apple-system, sans-serif;
     }
 
+    /* ===== ФОН С УЗОРАМИ ===== */
     .stApp {
-        background:
-            radial-gradient(circle at 0% 0%, #1e3a8a 0%, transparent 45%),
-            radial-gradient(circle at 100% 0%, #0f766e 0%, transparent 45%),
-            linear-gradient(180deg, #0f172a 0%, #111827 100%);
+        background-color: #0a0f1c;
+        background-image:
+            radial-gradient(circle at 15% 20%, rgba(59, 130, 246, 0.18) 0%, transparent 40%),
+            radial-gradient(circle at 85% 10%, rgba(34, 211, 238, 0.16) 0%, transparent 40%),
+            radial-gradient(circle at 75% 85%, rgba(167, 139, 250, 0.14) 0%, transparent 45%),
+            radial-gradient(circle at 20% 90%, rgba(20, 184, 166, 0.12) 0%, transparent 45%),
+            url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400' viewBox='0 0 400 400'><defs><pattern id='p' x='0' y='0' width='80' height='80' patternUnits='userSpaceOnUse'><path d='M40 0 L80 40 L40 80 L0 40 Z' fill='none' stroke='%233b82f6' stroke-opacity='0.05' stroke-width='1'/></pattern><pattern id='c' x='0' y='0' width='120' height='120' patternUnits='userSpaceOnUse'><circle cx='60' cy='60' r='30' fill='none' stroke='%2322d3ee' stroke-opacity='0.05' stroke-width='1'/></pattern></defs><rect width='400' height='400' fill='url(%23p)'/><rect width='400' height='400' fill='url(%23c)'/></svg>"),
+            linear-gradient(180deg, #0a0f1c 0%, #0f172a 100%);
+        background-attachment: fixed;
         color: #e5e7eb;
     }
 
     h1, h2, h3, h4, h5, h6 { color: #f9fafb !important; }
 
-    .main-title {
-        font-size: 2.4rem; font-weight: 800;
-        background: linear-gradient(90deg, #60a5fa 0%, #22d3ee 100%);
+    /* ===== ЗАГОЛОВОК ===== */
+    .hero-title {
+        font-family: 'Playfair Display', 'Manrope', serif;
+        font-size: 4.2rem;
+        font-weight: 900;
+        line-height: 1.05;
+        letter-spacing: -0.025em;
+        background: linear-gradient(90deg, #60a5fa 0%, #22d3ee 45%, #a78bfa 100%);
+        background-size: 200% 200%;
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        background-clip: text; margin: 0; line-height: 1.1;
+        background-clip: text;
+        margin: 0;
+        text-align: center;
+        filter: drop-shadow(0 6px 26px rgba(96, 165, 250, 0.35));
+        animation: heroShift 8s ease infinite;
     }
-    .main-subtitle { font-size: 1rem; color: #94a3b8; margin-top: 0.35rem; }
+    @keyframes heroShift {
+        0%   { background-position: 0% 50%; }
+        50%  { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    .hero-sub {
+        text-align: center;
+        color: #94a3b8;
+        font-size: 1.1rem;
+        margin-top: 0.6rem;
+        font-weight: 500;
+    }
 
-    .section-title {
-        font-size: 1.25rem; font-weight: 700; color: #f1f5f9;
-        margin: 0.6rem 0 0.4rem 0;
+    /* ===== КНОПКА ВЫХОДА В ПРАВОМ ВЕРХНЕМ УГЛУ ===== */
+    .logout-corner {
+        position: fixed; top: 1rem; right: 1.4rem; z-index: 999;
     }
-    .section-hint { color: #94a3b8; font-size: 0.85rem; margin-bottom: 1rem; }
+    .logout-corner button {
+        background: rgba(30, 41, 59, 0.85) !important;
+        color: #cbd5e1 !important;
+        border: 1px solid rgba(148, 163, 184, 0.3) !important;
+        border-radius: 10px !important;
+        padding: 0.4rem 0.9rem !important;
+        font-size: 0.85rem !important;
+        font-weight: 600 !important;
+    }
+    .logout-corner button:hover {
+        background: rgba(239, 68, 68, 0.25) !important;
+        color: #fff !important;
+        border-color: rgba(239, 68, 68, 0.6) !important;
+    }
+
+    /* ===== ВКЛАДКИ — БОЛЬШИЕ, ОВАЛЬНЫЕ ===== */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2rem;
+        justify-content: center;
+        border-bottom: none;
+        padding: 0.4rem 0 1.6rem 0;
+        margin-bottom: 1.4rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background: linear-gradient(180deg,
+            rgba(51, 65, 85, 0.9) 0%,
+            rgba(30, 41, 59, 0.95) 100%);
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 60px;
+        padding: 1.6rem 3.6rem;
+        color: #e2e8f0; font-weight: 800;
+        transition: all 0.22s ease;
+        min-height: 5.5rem;
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.1),
+            inset 0 -3px 0 rgba(0, 0, 0, 0.25),
+            0 8px 18px rgba(0, 0, 0, 0.4);
+    }
+    .stTabs [data-baseweb="tab"] p {
+        font-size: 2rem !important;
+        font-weight: 800 !important;
+        margin: 0 !important;
+        line-height: 1.2 !important;
+        letter-spacing: -0.01em !important;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background: linear-gradient(180deg,
+            rgba(59, 130, 246, 0.4) 0%,
+            rgba(37, 99, 235, 0.55) 100%);
+        border-color: rgba(147, 197, 253, 0.9);
+        transform: translateY(-4px) scale(1.02);
+        box-shadow: 0 16px 32px rgba(37, 99, 235, 0.5);
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(180deg,
+            #3b82f6 0%, #2563eb 55%, #1d4ed8 100%) !important;
+        border-color: #60a5fa !important;
+        color: #ffffff !important;
+        transform: translateY(-4px) scale(1.02);
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.35),
+            inset 0 -4px 0 rgba(0, 0, 0, 0.3),
+            0 18px 40px rgba(37, 99, 235, 0.55),
+            0 8px 18px rgba(96, 165, 250, 0.4);
+    }
+    .stTabs [aria-selected="true"] p { color: #ffffff !important; }
+
+    /* ===== ЗАГОЛОВКИ СЕКЦИЙ ===== */
+    .section-title {
+        font-size: 1.5rem; font-weight: 800; color: #f1f5f9;
+        margin: 1.2rem 0 0.5rem 0;
+        letter-spacing: -0.015em;
+    }
+    .section-hint {
+        color: #94a3b8; font-size: 0.95rem;
+        margin-bottom: 1.2rem;
+    }
+
+    /* ===== КРУПНЫЙ БЛОК ЗАГРУЗКИ ===== */
+    .upload-block {
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.9) 100%);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 20px;
+        padding: 1.6rem 1.9rem 1.4rem 1.9rem;
+        margin-bottom: 0.6rem;
+        margin-top: 1.4rem;
+        position: relative;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+    }
+    .upload-block::before {
+        content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 8px;
+        border-radius: 20px 0 0 20px;
+        background: linear-gradient(180deg, #60a5fa, #22d3ee, #a78bfa);
+    }
+    .upload-block-title {
+        display: flex; align-items: center; gap: 1rem;
+        font-size: 1.7rem; font-weight: 800; color: #f8fafc;
+        letter-spacing: -0.02em;
+        margin: 0;
+    }
+    .upload-block-icon {
+        font-size: 2.2rem; line-height: 1;
+        filter: drop-shadow(0 4px 12px rgba(96, 165, 250, 0.4));
+    }
+    .upload-block-desc {
+        color: #94a3b8; font-size: 1rem;
+        margin: 0.6rem 0 0.8rem 0;
+        line-height: 1.45;
+    }
+    .upload-block-format {
+        display: flex; align-items: center; gap: 0.7rem;
+        flex-wrap: wrap;
+        padding: 0.7rem 1rem;
+        background: rgba(96, 165, 250, 0.08);
+        border: 1px solid rgba(96, 165, 250, 0.25);
+        border-radius: 12px;
+        margin-bottom: 0.9rem;
+    }
+    .format-label {
+        color: #93c5fd; font-weight: 700; font-size: 0.88rem;
+        text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .format-code {
+        background: rgba(15, 23, 42, 0.9);
+        color: #fbbf24;
+        padding: 0.2rem 0.6rem;
+        border-radius: 6px;
+        font-family: 'Menlo', 'Consolas', monospace;
+        font-size: 0.85rem;
+    }
 
     /* ===== КАРТОЧКИ МЕТРИК ===== */
     .metric-card {
@@ -171,113 +384,55 @@ st.markdown(
     .status-ok::before { background: linear-gradient(180deg, #22c55e, #4ade80) !important; }
     .status-warn::before { background: linear-gradient(180deg, #f59e0b, #fbbf24) !important; }
 
-    /* ===== ЗАГОЛОВКИ БЛОКОВ ЗАГРУЗКИ ===== */
-    .upload-block-title {
-        display: flex; align-items: center; gap: 0.8rem;
-        font-size: 1.55rem; font-weight: 800; color: #f8fafc;
-        letter-spacing: -0.015em;
-        margin: 0;
-        padding: 0.2rem 0;
-    }
-    .upload-block-icon {
-        font-size: 2rem; line-height: 1;
-        filter: drop-shadow(0 4px 10px rgba(96, 165, 250, 0.35));
-    }
-    .upload-block-desc {
-        color: #94a3b8; font-size: 0.95rem;
-        margin: 0.4rem 0 0.9rem 0;
-    }
-    .upload-block {
-        background: linear-gradient(135deg, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.85) 100%);
-        border: 1px solid rgba(148, 163, 184, 0.2);
-        border-radius: 18px;
-        padding: 1.5rem 1.7rem 1.3rem 1.7rem;
-        margin-bottom: 1.4rem;
-        position: relative;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-    }
-    .upload-block::before {
-        content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
-        border-radius: 18px 0 0 18px;
-        background: linear-gradient(180deg, #60a5fa, #22d3ee, #a78bfa);
-    }
-
-    /* ===== БОЛЬШИЕ КНОПКИ / ВКЛАДКИ ===== */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 1.2rem; justify-content: center;
-        border-bottom: 2px solid rgba(148, 163, 184, 0.15);
-        padding: 0.6rem 0 1.2rem 0;
-        margin-bottom: 1.4rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background: linear-gradient(180deg,
-            rgba(51, 65, 85, 0.85) 0%,
-            rgba(30, 41, 59, 0.95) 100%);
-        border: 1px solid rgba(148, 163, 184, 0.3);
-        border-radius: 16px;
-        padding: 1.1rem 2.2rem;
-        color: #e2e8f0; font-weight: 800;
-        transition: all 0.22s ease;
-        min-height: 3.6rem;
-        box-shadow:
-            inset 0 1px 0 rgba(255, 255, 255, 0.1),
-            inset 0 -2px 0 rgba(0, 0, 0, 0.25),
-            0 6px 14px rgba(0, 0, 0, 0.35);
-    }
-    .stTabs [data-baseweb="tab"] p {
-        font-size: 1.35rem !important;
-        font-weight: 800 !important;
-        margin: 0 !important;
-        line-height: 1.2 !important;
-    }
-    .stTabs [data-baseweb="tab"]:hover {
-        background: linear-gradient(180deg,
-            rgba(59, 130, 246, 0.35) 0%,
-            rgba(37, 99, 235, 0.5) 100%);
-        border-color: rgba(147, 197, 253, 0.8);
-        transform: translateY(-3px) scale(1.015);
-        box-shadow: 0 14px 28px rgba(37, 99, 235, 0.45);
-    }
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(180deg,
-            #3b82f6 0%, #2563eb 50%, #1d4ed8 100%) !important;
-        border-color: #60a5fa !important;
-        color: #ffffff !important;
-        transform: translateY(-3px) scale(1.015);
-        box-shadow:
-            inset 0 1px 0 rgba(255, 255, 255, 0.35),
-            inset 0 -3px 0 rgba(0, 0, 0, 0.3),
-            0 16px 36px rgba(37, 99, 235, 0.55),
-            0 6px 16px rgba(96, 165, 250, 0.4);
-    }
-    .stTabs [aria-selected="true"] p {
-        color: #ffffff !important;
-    }
-
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0b1220 0%, #0f172a 100%);
-        border-right: 1px solid rgba(148, 163, 184, 0.1);
-    }
-
+    /* ===== КНОПКИ ===== */
     .stButton > button {
         background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-        color: #fff; border: none; border-radius: 10px;
-        padding: 0.55rem 1.1rem; font-weight: 600;
+        color: #fff; border: none; border-radius: 12px;
+        padding: 0.7rem 1.3rem; font-weight: 700;
+        font-size: 1rem;
+        box-shadow: 0 6px 18px rgba(37, 99, 235, 0.3);
+        transition: all 0.18s ease;
     }
-    .stButton > button:hover { filter: brightness(1.1); }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        filter: brightness(1.1);
+        box-shadow: 0 10px 26px rgba(37, 99, 235, 0.5);
+    }
 
     .stDownloadButton > button {
         background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%);
-        color: #fff; border: none; border-radius: 10px;
-        padding: 0.55rem 1.1rem; font-weight: 600; width: 100%;
+        color: #fff; border: none; border-radius: 12px;
+        padding: 0.7rem 1.3rem; font-weight: 700;
+        font-size: 1rem; width: 100%;
+        box-shadow: 0 6px 18px rgba(13, 148, 136, 0.3);
+    }
+    .stDownloadButton > button:hover {
+        transform: translateY(-2px); filter: brightness(1.1);
     }
 
+    /* ===== SELECTBOX ===== */
     div[data-baseweb="select"] > div {
-        background: rgba(15, 23, 42, 0.8) !important;
+        background: rgba(15, 23, 42, 0.85) !important;
+        border: 1px solid rgba(96, 165, 250, 0.35) !important;
         color: #f1f5f9 !important;
+        border-radius: 12px !important;
+        font-size: 1rem !important;
+        font-weight: 600 !important;
     }
-    label { color: #cbd5e1 !important; }
+    label { color: #cbd5e1 !important; font-weight: 600 !important; }
 
+    /* ===== FILE UPLOADER ВНУТРИ БЛОКА ===== */
+    [data-testid="stFileUploader"] {
+        background: rgba(15, 23, 42, 0.5);
+        border: 1px dashed rgba(96, 165, 250, 0.35);
+        border-radius: 14px;
+        padding: 0.4rem 0.6rem;
+    }
+    [data-testid="stFileUploader"]:hover {
+        border-color: rgba(96, 165, 250, 0.6);
+    }
+
+    section[data-testid="stSidebar"] { display: none; }
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
     header[data-testid="stHeader"] { background: transparent; }
@@ -288,7 +443,35 @@ st.markdown(
 
 
 # ============================================================
-# СПРАВОЧНИКИ МЕСЯЦЕВ
+# КНОПКА «ВЫЙТИ» В ПРАВОМ ВЕРХНЕМ УГЛУ
+# ============================================================
+
+col_logout_left, col_logout_right = st.columns([5, 1])
+with col_logout_right:
+    if st.button(f"Выйти ({current_user})", key="logout_top"):
+        st.session_state.pop(SESSION_KEY, None)
+        st.rerun()
+
+
+# ============================================================
+# ЗАГОЛОВОК
+# ============================================================
+
+st.markdown(
+    """
+    <div style="padding: 0.5rem 0 0.4rem 0;">
+        <div class="hero-title">📊 Отчет для собственника</div>
+        <div class="hero-sub">
+            Финансовая отчётность Estate · Unelma · Nomiqa и диаграммы для презентации
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# ВЫБОР ПЕРИОДА — ПОД ЗАГОЛОВКОМ
 # ============================================================
 
 _MONTH_NAMES = {
@@ -299,113 +482,37 @@ _MONTH_NAMES = {
 
 _YEAR_OPTIONS = [2026, 2027]
 
+st.markdown("<br>", unsafe_allow_html=True)
+col_yr, col_mo, col_sp = st.columns([1.2, 1.6, 3])
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНОЕ: КРУПНЫЙ БЛОК ЗАГРУЗКИ
-# ============================================================
-
-def _upload_block_html(title, icon, desc):
-    """HTML-карточка заголовка блока загрузки."""
-    return f"""
-    <div class="upload-block">
-        <div class="upload-block-title">
-            <span class="upload-block-icon">{icon}</span>
-            <span>{title}</span>
-        </div>
-        <div class="upload-block-desc">{desc}</div>
-    </div>
-    """
-
-
-# ============================================================
-# ВЫБОР ПЕРИОДА (SIDEBAR)
-# ============================================================
-
-st.sidebar.markdown("### 📅 Период отчёта")
-
-_year = st.sidebar.selectbox(
-    "Год", options=_YEAR_OPTIONS, index=0, key="report_year",
-)
-
-_month = st.sidebar.selectbox(
-    "Месяц",
-    options=list(_MONTH_NAMES.keys()),
-    format_func=lambda m: _MONTH_NAMES[m],
-    index=config.REPORT_MONTH - 1,
-    key="report_month",
-)
+with col_yr:
+    _year = st.selectbox(
+        "Год", options=_YEAR_OPTIONS, index=0, key="report_year",
+    )
+with col_mo:
+    _month = st.selectbox(
+        "Месяц",
+        options=list(_MONTH_NAMES.keys()),
+        format_func=lambda m: _MONTH_NAMES[m],
+        index=config.REPORT_MONTH - 1,
+        key="report_month",
+    )
+with col_sp:
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="color:#93c5fd; font-weight:700; font-size:1.05rem;">'
+        f'📅 Период отчёта: {_MONTH_NAMES[_month]} {_year}</div>',
+        unsafe_allow_html=True,
+    )
 
 config.set_period(_year, _month)
-
-st.sidebar.markdown("---")
-st.sidebar.caption(f"📅 Период: **{_MONTH_NAMES[_month]} {_year}**")
-st.sidebar.markdown("---")
-st.sidebar.caption(f"👤 Пользователь: **{current_user}**")
-
-if st.sidebar.button("Выйти", use_container_width=True):
-    st.session_state.pop(SESSION_KEY, None)
-    st.rerun()
-
-
-# ============================================================
-# ВСПОМОГАТЕЛЬНОЕ: ДИАГНОСТИКА
-# ============================================================
-
-def _file_status_table():
-    result = {}
-    for report_key in ("Estate", "Unelma", "Nomiqa"):
-        try:
-            missing = config.check_inputs(report_key)
-        except Exception as e:
-            result[report_key] = [("error", Path(str(e)))]
-            continue
-        flat = []
-        for k in ("template", "opiu_prev", "opiu_cur", "bdr",
-                  "forecast", "vat"):
-            for p in missing.get(k, []):
-                flat.append((k, Path(p)))
-        result[report_key] = flat
-    return result
-
-
-def _save_uploaded(files, target_dir):
-    if not files:
-        return 0
-    target_dir.mkdir(parents=True, exist_ok=True)
-    saved = 0
-    for f in files:
-        try:
-            path = target_dir / f.name
-            with open(path, "wb") as out:
-                out.write(f.getbuffer())
-            saved += 1
-        except Exception as e:
-            st.warning(f"Не удалось сохранить {f.name}: {e}")
-    return saved
-
-
-# ============================================================
-# ЗАГОЛОВОК
-# ============================================================
-
-st.markdown(
-    f"""
-    <div style="padding: 0.5rem 0 1.0rem 0;">
-        <div class="main-title">📊 Отчет для собственника</div>
-        <div class="main-subtitle">
-            Период: <b style="color:#93c5fd;">{_MONTH_NAMES[_month]} {_year}</b>
-            · Estate · Unelma · Nomiqa
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
 
 # ============================================================
 # ДВЕ ВКЛАДКИ
 # ============================================================
 
+st.markdown("<br>", unsafe_allow_html=True)
 tab_reports, tab_presentation = st.tabs([
     "📊  Отчёты для собственника",
     "📈  Диаграммы для презентации",
@@ -413,7 +520,7 @@ tab_reports, tab_presentation = st.tabs([
 
 
 # ============================================================
-# ВКЛАДКА 1: ОТЧЁТЫ ДЛЯ СОБСТВЕННИКА
+# ВКЛАДКА 1: ОТЧЁТЫ
 # ============================================================
 
 with tab_reports:
@@ -430,72 +537,73 @@ with tab_reports:
         unsafe_allow_html=True,
     )
 
-    # --- ОПиУ ---
+    # ---- ОПиУ ----
     st.markdown(
         _upload_block_html(
-            "ОПиУ (отчёт о прибылях и убытках)",
-            "📗",
-            "Загрузите файлы ОПиУ за <b>прошлый</b> и <b>текущий</b> месяц "
-            "для направлений: Латвия, Европа, Estate AZE, Nomiqa, "
-            "UK Estate, Unelma, Estate (единый).",
+            "📗", "ОПиУ (отчёт о прибылях и убытках)",
+            "Файлы ОПиУ за <b>прошлый</b> и <b>текущий</b> месяц по каждому "
+            "направлению: <b>Латвия</b>, <b>Европа</b>, <b>Estate AZE</b>, "
+            "<b>Nomiqa</b>, <b>UK Estate</b>, <b>Unelma</b>, "
+            "<b>Estate (единый)</b>.",
+            "ОПиУ ММ.ГГГГ-ММ.ГГГГ <Направление>.xlsx",
         ),
         unsafe_allow_html=True,
     )
     opiu_files = st.file_uploader(
-        "Выберите один или несколько файлов ОПиУ (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_opiu",
+        "ОПиУ (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_opiu",
         label_visibility="collapsed",
     )
 
-    # --- БДиР ---
+    # ---- БДиР ----
     st.markdown(
         _upload_block_html(
-            "БДиР (бюджет доходов и расходов)",
-            "📘",
-            "Загрузите годовые файлы БДиР по направлениям: Латвия, "
-            "Европа (Estate EU), Estate AZE, Nomiqa, UK Estate, Unelma.",
+            "📘", "БДиР (бюджет доходов и расходов)",
+            "Годовые файлы БДиР по направлениям: <b>Латвия</b>, "
+            "<b>Европа (Estate EU)</b>, <b>Estate AZE</b>, <b>Nomiqa</b>, "
+            "<b>UK Estate</b>, <b>Unelma</b>.",
+            "БДиР 08.2026-12.2026 <Направление>.xlsx",
         ),
         unsafe_allow_html=True,
     )
     bdr_files = st.file_uploader(
-        "Выберите один или несколько файлов БДиР (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_bdr",
+        "БДиР (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_bdr",
         label_visibility="collapsed",
     )
 
-    # --- Прогнозы ---
+    # ---- Прогнозы ----
     st.markdown(
         _upload_block_html(
-            "Прогнозы месячные",
-            "📙",
-            "Загрузите файлы «Прогнозы месячные» по тем же направлениям, "
-            "что и БДиР.",
+            "📙", "Прогнозы месячные",
+            "Файлы «Прогнозы месячные» по тем же направлениям, что и БДиР.",
+            "Прогнозы месячные <Направление>.xlsx",
         ),
         unsafe_allow_html=True,
     )
     forecast_files = st.file_uploader(
-        "Выберите один или несколько файлов Прогнозов (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_forecast",
+        "Прогнозы (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_forecast",
         label_visibility="collapsed",
     )
 
-    # --- НДС ---
+    # ---- НДС ----
     st.markdown(
         _upload_block_html(
-            "НДС (файлы «НДС ММ.ГГГГ <Статья>.xlsx»)",
-            "📕",
-            "Загрузите файлы НДС за <b>прошлый</b> и <b>текущий</b> месяц. "
-            "В имени файла должно быть слово «НДС» и расширение <code>.xlsx</code>.",
+            "📕", "НДС",
+            "Файлы НДС за <b>прошлый</b> и <b>текущий</b> месяц. "
+            "В имени файла должно быть слово «НДС».",
+            "НДС ММ.ГГГГ <Статья>.xlsx",
         ),
         unsafe_allow_html=True,
     )
     vat_files = st.file_uploader(
-        "Выберите один или несколько файлов НДС (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_vat",
+        "НДС (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_vat",
         label_visibility="collapsed",
     )
 
-    # --- Сохраняем загруженные файлы ---
+    # Сохраняем
     n_opiu     = _save_uploaded(opiu_files, config.TEMP_OPIU_DIR)
     n_bdr      = _save_uploaded(bdr_files, config.TEMP_FORECAST_DIR)
     n_forecast = _save_uploaded(forecast_files, config.TEMP_FORECAST_DIR)
@@ -508,14 +616,13 @@ with tab_reports:
             f"Прогнозов — {n_forecast}, НДС — {n_vat}."
         )
 
-    # --- Карточки метрик ---
+    # Метрики
     status = _file_status_table()
     ready = sum(1 for k in status if not status[k])
     total_missing = sum(len(v) for v in status.values())
 
     st.markdown("<br>", unsafe_allow_html=True)
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
         st.markdown(
             f"""
@@ -524,8 +631,7 @@ with tab_reports:
                 <div class="metric-value">{_MONTH_NAMES[_month]} {_year}</div>
                 <div class="metric-sub">отчётный месяц</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True,
         )
     with col2:
         st.markdown(
@@ -535,8 +641,7 @@ with tab_reports:
                 <div class="metric-value">3</div>
                 <div class="metric-sub">Estate · Unelma · Nomiqa</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True,
         )
     with col3:
         cls = "metric-card status-ok" if ready == 3 else "metric-card"
@@ -547,12 +652,12 @@ with tab_reports:
                 <div class="metric-value">{ready} / 3</div>
                 <div class="metric-sub">все входные файлы на месте</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True,
         )
     with col4:
         if total_missing == 0:
-            cls, val, sub = ("metric-card status-ok", "всё на месте", "можно собирать")
+            cls, val, sub = ("metric-card status-ok",
+                             "всё на месте", "можно собирать")
         else:
             cls = "metric-card status-warn"
             val = f"не хватает: {total_missing}"
@@ -564,30 +669,25 @@ with tab_reports:
                 <div class="metric-value">{val}</div>
                 <div class="metric-sub">{sub}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True,
         )
 
-    # --- Проверка готовности ---
+    # Проверка
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div class="section-title">🔍 Шаг 2 · Проверка готовности</div>',
         unsafe_allow_html=True,
     )
-
     for report_key in ("Estate", "Unelma", "Nomiqa"):
         missing = status[report_key]
         if not missing:
             st.success(f"**{report_key}**: все входные файлы на месте — можно собирать.")
         else:
             labels = {
-                "template":  "Шаблон",
-                "opiu_prev": "ОПиУ за прошлый месяц",
-                "opiu_cur":  "ОПиУ за текущий месяц",
-                "bdr":       "БДиР",
-                "forecast":  "Прогноз месячный",
-                "vat":       "НДС",
-                "error":     "Ошибка проверки",
+                "template": "Шаблон", "opiu_prev": "ОПиУ за прошлый месяц",
+                "opiu_cur": "ОПиУ за текущий месяц", "bdr": "БДиР",
+                "forecast": "Прогноз месячный", "vat": "НДС",
+                "error": "Ошибка проверки",
             }
             with st.expander(
                 f"⚠️ {report_key}: не хватает {len(missing)} файлов",
@@ -596,16 +696,14 @@ with tab_reports:
                 for k, p in missing:
                     st.text(f"• {labels.get(k, k)}: {p.name}")
 
-    # --- Сборка отчётов ---
+    # Сборка
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div class="section-title">🚀 Шаг 3 · Сборка отчётов</div>',
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<div class="section-hint">'
-        'Соберите все три отчёта одной кнопкой или выборочно.'
-        '</div>',
+        '<div class="section-hint">Соберите все три отчёта или выборочно.</div>',
         unsafe_allow_html=True,
     )
 
@@ -623,29 +721,27 @@ with tab_reports:
                 with st.expander("🔧 Подробности ошибки"):
                     st.code(traceback.format_exc())
 
-    col_all, col_est, col_un, col_nom = st.columns([1.4, 1, 1, 1])
-
-    with col_all:
+    c_all, c_est, c_un, c_nom = st.columns([1.4, 1, 1, 1])
+    with c_all:
         if st.button("🔨 Собрать все отчёты", type="primary",
                      use_container_width=True):
             _run_build("ALL")
-    with col_est:
+    with c_est:
         if st.button("Estate", use_container_width=True, type="secondary"):
             _run_build("Estate")
-    with col_un:
+    with c_un:
         if st.button("Unelma", use_container_width=True, type="secondary"):
             _run_build("Unelma")
-    with col_nom:
+    with c_nom:
         if st.button("Nomiqa", use_container_width=True, type="secondary"):
             _run_build("Nomiqa")
 
-    # --- Скачивание отчётов ---
+    # Скачивание
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div class="section-title">💾 Шаг 4 · Скачать готовые отчёты</div>',
         unsafe_allow_html=True,
     )
-
     col_dl_1, col_dl_2, col_dl_3 = st.columns(3)
     for col, key in zip((col_dl_1, col_dl_2, col_dl_3),
                         ("Estate", "Unelma", "Nomiqa")):
@@ -656,11 +752,9 @@ with tab_reports:
                     data = f.read()
                 st.download_button(
                     label=f"⬇️ Скачать {key}",
-                    data=data,
-                    file_name=path.name,
+                    data=data, file_name=path.name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_{key}",
-                    use_container_width=True,
+                    key=f"download_{key}", use_container_width=True,
                 )
                 st.caption(f"`{path.name}`")
             else:
@@ -668,7 +762,7 @@ with tab_reports:
 
 
 # ============================================================
-# ВКЛАДКА 2: ДИАГРАММЫ ДЛЯ ПРЕЗЕНТАЦИИ
+# ВКЛАДКА 2: ДИАГРАММЫ
 # ============================================================
 
 with tab_presentation:
@@ -679,108 +773,101 @@ with tab_presentation:
     )
     st.markdown(
         '<div class="section-hint">'
-        'Загрузите ОПиУ за все месяцы года, единый БДиР, ОДДС, файлы '
-        'возмещения КУ и два справочника.'
+        'Загрузите ОПиУ за все месяцы года, единый БДиР, ОДДС, '
+        'файлы возмещения КУ и два справочника.'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    # --- ОПиУ за все месяцы ---
     st.markdown(
         _upload_block_html(
-            "ОПиУ за все месяцы года",
-            "📗",
-            "Например: <code>ОПиУ 01.2026-09.2026.xlsx</code> — "
-            "нужен для построения всех диаграмм презентации.",
+            "📗", "ОПиУ за все месяцы года",
+            "Сводный файл ОПиУ за январь–отчётный месяц. "
+            "Нужен для построения всех диаграмм презентации.",
+            "ОПиУ 01.2026-09.2026.xlsx",
         ),
         unsafe_allow_html=True,
     )
     opiu_full_year_files = st.file_uploader(
-        "Выберите ОПиУ за все месяцы (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_opiu_full_year",
+        "ОПиУ за все месяцы (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_opiu_full_year",
         label_visibility="collapsed",
     )
 
-    # --- Единый БДиР ---
     st.markdown(
         _upload_block_html(
-            "БДиР единый сводный",
-            "📘",
-            "Например: <code>БДиР 01.2026-12.2026.xlsx</code> — "
-            "нужен для диаграмм План/Факт.",
+            "📘", "БДиР единый сводный",
+            "Один файл БДиР за весь год. Нужен для диаграмм «План/Факт».",
+            "БДиР 01.2026-12.2026.xlsx",
         ),
         unsafe_allow_html=True,
     )
     bdr_full_year_files = st.file_uploader(
-        "Выберите БДиР за все месяцы (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_bdr_full_year",
+        "БДиР за все месяцы (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_bdr_full_year",
         label_visibility="collapsed",
     )
 
-    # --- ОДДС ---
     st.markdown(
         _upload_block_html(
-            "ОДДС (операционное сальдо и ДДС)",
-            "📒",
-            "Например: <code>ОДДС 01.01.2026-30.09.2026.xlsx</code> — "
-            "для слайдов «Операционное сальдо» и «Анализ ДДС».",
+            "📒", "ОДДС (операционное сальдо и ДДС)",
+            "ОДДС за весь год. Нужен для слайдов «Операционное сальдо» "
+            "и «Анализ ДДС».",
+            "ОДДС 01.01.2026-30.09.2026.xlsx",
         ),
         unsafe_allow_html=True,
     )
     odds_files = st.file_uploader(
-        "Выберите ОДДС (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_odds",
+        "ОДДС (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_odds",
         label_visibility="collapsed",
     )
 
-    # --- ОДДС для слайдов 25/27/29 ---
     st.markdown(
         _upload_block_html(
-            "ОДДС для слайдов 25/27/29 (Возмещение КУ)",
-            "📗",
+            "📗", "ОДДС для слайдов 25 / 27 / 29 (Возмещение КУ)",
             "Два файла ОДДС за весь год для таблиц возмещения КУ. "
             "В именах должны быть слова «с НДС» и «без НДС».",
+            "ОДДС 01.01.2026-30.09.2026 с НДС.xlsx<br>"
+            "ОДДС 01.01.2026-30.09.2026 без НДС.xlsx",
         ),
         unsafe_allow_html=True,
     )
     ku_files = st.file_uploader(
-        "Выберите файлы ОДДС для слайдов 25/27/29 (.xlsx)",
-        type=["xlsx"], accept_multiple_files=True, key="upload_ku",
+        "ОДДС для КУ (.xlsx)", type=["xlsx"],
+        accept_multiple_files=True, key="upload_ku",
         label_visibility="collapsed",
     )
 
-    # --- Справочники ---
     st.markdown(
         _upload_block_html(
-            "Справочник: Вложенные средства на объекты",
-            "📓",
-            "Файл <code>Вложенные средства на объекты.xlsx</code> — "
-            "для расчёта ROI на слайде 70.",
+            "📓", "Справочник: Вложенные средства на объекты",
+            "Один файл. Используется для расчёта ROI (слайд 70).",
+            "Вложенные средства на объекты.xlsx",
         ),
         unsafe_allow_html=True,
     )
     investment_files = st.file_uploader(
-        "Выберите файл вложений (.xlsx)",
-        type=["xlsx"], accept_multiple_files=False, key="upload_investments",
+        "Вложения (.xlsx)", type=["xlsx"],
+        accept_multiple_files=False, key="upload_investments",
         label_visibility="collapsed",
     )
 
     st.markdown(
         _upload_block_html(
-            "Справочник: Долги и численность сотрудников",
-            "📓",
-            "Файл <code>таблица Долги и Численность сотрудников.xlsx</code> — "
-            "для слайдов 14, 19, 24, 64.",
+            "📓", "Справочник: Долги и численность сотрудников",
+            "Один файл. Используется для слайдов 14, 19, 24, 64.",
+            "таблица Долги и Численность сотрудников.xlsx",
         ),
         unsafe_allow_html=True,
     )
     debts_files = st.file_uploader(
-        "Выберите файл долгов и численности (.xlsx)",
-        type=["xlsx"], accept_multiple_files=False, key="upload_debts",
+        "Долги (.xlsx)", type=["xlsx"],
+        accept_multiple_files=False, key="upload_debts",
         label_visibility="collapsed",
     )
 
-    # --- Сохраняем ---
+    # Сохранение
     n_opiu_full = _save_uploaded(opiu_full_year_files, config.TEMP_OPIU_DIR)
     n_bdr_full  = _save_uploaded(bdr_full_year_files, config.TEMP_FORECAST_DIR)
     n_odds      = _save_uploaded(odds_files, config.TEMP_FORECAST_DIR)
@@ -819,13 +906,12 @@ with tab_presentation:
             f"Долгов — {n_debts}."
         )
 
-    # --- Сборка диаграмм ---
+    # Сборка
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div class="section-title">🚀 Шаг 2 · Сборка диаграмм</div>',
         unsafe_allow_html=True,
     )
-
     if st.button("📊 Собрать диаграммы для презентации",
                  type="primary", use_container_width=True,
                  key="build_presentation"):
@@ -853,30 +939,25 @@ with tab_presentation:
                     with st.expander("🔧 Подробности ошибки"):
                         st.code(traceback.format_exc())
 
-    # --- Скачивание ---
+    # Скачивание
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div class="section-title">💾 Шаг 3 · Скачать готовый файл</div>',
         unsafe_allow_html=True,
     )
-
     pres_path = config.PRESENTATION_OUTPUT_FILE
     if pres_path and pres_path.exists():
         with open(pres_path, "rb") as f:
             pres_data = f.read()
         st.download_button(
             label="⬇️ Скачать «Диаграммы для презентации»",
-            data=pres_data,
-            file_name=pres_path.name,
+            data=pres_data, file_name=pres_path.name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_presentation",
-            use_container_width=True,
+            key="download_presentation", use_container_width=True,
         )
         st.caption(f"`{pres_path.name}`")
     else:
-        st.info(
-            f"Файл ещё не собран: `{pres_path.name if pres_path else '—'}`"
-        )
+        st.info(f"Файл ещё не собран: `{pres_path.name if pres_path else '—'}`")
 
 
 # ============================================================
