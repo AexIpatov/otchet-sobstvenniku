@@ -1,2648 +1,2626 @@
-# src/report_builder.py
+# src/presentation_builder_v2.py
 # ============================================================
-# Сборка отчётов.
+# Генератор Excel с диаграммами для презентации.
 #
-# ВАЖНО: этот модуль импортирует config и parsers. Обратный импорт
-# (parsers → report_builder или config → report_builder) недопустим —
-# это создаст циклический импорт.
+# ИЗМЕНЕНИЯ (сентябрь 2026):
+#   1) _collect_breakeven теперь разделяет расходы на переменные
+#      и постоянные по config.VARIABLE_EXPENSE_KEYS / FIXED_EXPENSE_KEYS.
+#   2) Точка безубыточности считается по формуле:
+#        ТБУ = Постоянные / (1 - Переменные/Выручка)
+#      Если переменных нет (чистая аренда) — ТБУ = Постоянные.
+#   3) Добавлена поддержка косвенных расходов, распределённых
+#      на юнит по валовой прибыли (ВП1).
 # ============================================================
 
 import os
 import re
+import datetime as _dt
+
 import openpyxl
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.drawing.spreadsheet_drawing import (
+    OneCellAnchor, AnchorMarker,
+)
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.utils.units import cm_to_EMU
 
 import config
-from src.parsers import (
-    parse_opiu, parse_bdr, parse_forecast, parse_investments,
-    parse_vat, parse_vat_ref_bdr, parse_vat_ref_forecast,
-)
 
 
 # ============================================================
-# БЕЗОПАСНЫЕ ОБЁРТКИ ПАРСЕРОВ
+# КОНСТАНТЫ
 # ============================================================
 
-def _parse_opiu_safe(path, objects, row_map, month_name_ru=None):
-    if not path or not os.path.exists(path):
-        if config.DEBUG:
-            print(f"[safe] файл ОПиУ не найден — колонка будет нулевой: {path}")
-        return {}
-    try:
-        return parse_opiu(path, objects, row_map, month_name_ru=month_name_ru)
-    except FileNotFoundError:
-        return {}
-
-
-def _parse_bdr_safe(path, objects, month, row_map):
-    if not path or not os.path.exists(path):
-        if config.DEBUG:
-            print(f"[safe] файл БДиР не найден — колонка будет нулевой: {path}")
-        return {}
-    try:
-        return parse_bdr(path, objects, month, row_map)
-    except FileNotFoundError:
-        return {}
-
-
-def _parse_forecast_safe(path, sheet, month, row_map):
-    if not path or not os.path.exists(path):
-        if config.DEBUG:
-            print(f"[safe] файл Прогнозов не найден — колонка будет нулевой: {path}")
-        return {}
-    try:
-        return parse_forecast(path, sheet, month, row_map)
-    except FileNotFoundError:
-        return {}
-
-
-def _parse_vat_safe(year, month, objects):
-    """Безопасная обёртка над parse_vat."""
-    try:
-        return parse_vat(config.TEMP_VAT_DIR, year, month, objects)
-    except Exception as e:
-        print(f"[WARN] [vat] ошибка: {e}")
-        return {"НДС": 0.0, "с_НДС": 0.0}
-
-
-def _parse_vat_ref_bdr_safe(path, month, block_name, objects):
-    try:
-        return parse_vat_ref_bdr(path, month, block_name, objects)
-    except Exception as e:
-        print(f"[WARN] [vat_ref bdr] ошибка: {e}")
-        return None
-
-
-def _parse_vat_ref_forecast_safe(path, sheet_name, month, block_name, objects):
-    try:
-        return parse_vat_ref_forecast(path, sheet_name, month,
-                                      block_name, objects)
-    except Exception as e:
-        print(f"[WARN] [vat_ref forecast] ошибка: {e}")
-        return None
-
-
-# ============================================================
-# НОРМАЛИЗАЦИЯ ЮНИКОДА
-# ============================================================
-
-_HOMOGLYPH_MAP = {
-    "\u0061": "\u0430", "\u0063": "\u0441", "\u0065": "\u0435",
-    "\u006f": "\u043e", "\u0070": "\u0440", "\u0078": "\u0445",
-    "\u0079": "\u0443", "\u0073": "\u0441",
-    "\u0041": "\u0410", "\u0042": "\u0412", "\u0043": "\u0421",
-    "\u0045": "\u0415", "\u0048": "\u041d", "\u004b": "\u041a",
-    "\u004d": "\u041c", "\u004f": "\u041e", "\u0050": "\u0420",
-    "\u0054": "\u0422", "\u0058": "\u0425", "\u0059": "\u0423",
+_MONTHS_RU_LOWER = {
+    1: "январь", 2: "февраль", 3: "март", 4: "апрель",
+    5: "май", 6: "июнь", 7: "июль", 8: "август",
+    9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
+}
+_MONTHS_RU_CAP = {
+    1: "Янв", 2: "Фев", 3: "Мар", 4: "Апр", 5: "Май", 6: "Июн",
+    7: "Июл", 8: "Авг", 9: "Сен", 10: "Окт", 11: "Ноя", 12: "Дек",
 }
 
+_UNITS = [
+    "Latvia",
+    "East-Восток",
+    "Europe",
+    "Nomiqa",
+    "Unelma",
+    "UK Estate",
+]
 
-def _normalize_unicode(s):
-    if s is None:
-        return ""
-    return "".join(_HOMOGLYPH_MAP.get(ch, ch) for ch in str(s))
+_LATVIA_OBJECTS = [
+    ("AN14 Антониас 14 (дом + парковка)", "Антонияс", 10),
+    ("AC89 Чака 89 (дом + парковка)",     "Чака",     15),
+    ("M81 - Matisa 81",                    "Матиса",   32),
+    ("EKS_Esporta iela 12-113",            "Эспорта",  28),
+]
 
+_LATVIA_COMMERCIAL = [
+    "D4 Парковка-Deglava4",
+    "AC87 Гараж Чака",
+    "B117 Бривибас, 117",
+    "B78 Бривибас, 78",
+    "C23 Цесу, 23",
+    "DAR1_Darzauglu1",
+    "DS1 Дзирнаву, 1",
+    "G73 Гертрудес, 73",
+    "H5 Хоспиталю",
+    "MP1_Marupe",
+    "MU3 - Mucenieku 3 - 4",
+    "OZ1 Озолниеки",
+    "SK3-Skunju 3",
+    "UK_Latvia",
+    "V22 К. Валдемара 22",
+    "BRN_Brunieku",
+]
 
-# Расширенный regex для всех видов пробельных и невидимых символов.
-_ALL_SPACES_RE = re.compile(
-    r"[\s\u00a0\u2000-\u200b\u2009\u200a\u202f\u205f\u3000\ufeff]+",
-    flags=re.UNICODE,
+_UNIT_SLIDE_START = {
+    "Latvia":        4,
+    "East-Восток":  38,
+    "Europe":       49,
+    "Nomiqa":       71,
+    "Unelma":       67,
+    "UK Estate":    56,
+}
+
+_HEADER_FILL   = PatternFill("solid", fgColor="1E3A8A")
+_HEADER_FONT   = Font(bold=True, color="FFFFFF", size=11)
+_TITLE_FONT    = Font(bold=True, size=14, color="1E3A8A")
+_SUBTITLE_FONT = Font(italic=True, size=10, color="64748B")
+_CELL_BORDER   = Border(
+    left=Side(style="thin", color="CBD5E1"),
+    right=Side(style="thin", color="CBD5E1"),
+    top=Side(style="thin", color="CBD5E1"),
+    bottom=Side(style="thin", color="CBD5E1"),
 )
 
-
-def _norm_for_compare(s):
-    """
-    Нормализация для сопоставления имён.
-    Убирает ВСЕ виды пробелов и невидимых символов
-    (обычные, неразрывные, тонкие, bidi-маркеры, BOM и т.п.),
-    чтобы 'Выручка Антонияс' и 'ВыручкаАнтонияс' считались
-    одинаковыми и не зависели от типографских деталей.
-    """
-    if s is None:
-        return ""
-    s = _normalize_unicode(s)
-    s = _ALL_SPACES_RE.sub("", s)
-    return s.lower()
+_COLOR_REVENUE = "FFC000"
+_COLOR_NET     = "70AD47"
+_COLOR_LINE_RED = "C00000"
+_COLOR_LINE_YEL = "FFC000"
+_COLOR_LINE_BLU = "4472C4"
 
 
 # ============================================================
 # ВСПОМОГАТЕЛЬНОЕ
 # ============================================================
 
-def _sum_dicts(*dicts):
-    result = {}
-    for d in dicts:
-        if not d:
-            continue
-        for k, v in d.items():
-            result[k] = result.get(k, 0.0) + (v or 0.0)
-    return result
-
-
-def _empty_period():
-    return {
-        "prev_fact": {},
-        "plan_year": {},
-        "plan_month": {},
-        "fact_month": {},
-        "next_forecast": {},
-        # НДС, собранный отдельно от выручки:
-        "vat": {
-            "prev_fact":     None,   # колонка C
-            "plan_year":     None,   # колонка E
-            "plan_month":    None,   # колонка F
-            "fact_month":    None,   # колонка H
-            "next_forecast": None,   # колонка J
-        },
-    }
-
-
-# ============================================================
-# ВЛОЖЕННЫЕ СРЕДСТВА
-# ============================================================
-
-def _investments_for_simple_block(block, investments):
-    if block not in config.BLOCK_SOURCES:
-        return 0.0
-    # >>> ИЗМЕНЕНО:
-    # Блок «УК» — управляющая компания, но по требованию
-    # пользователя в него нужно подтянуть ОБЩУЮ сумму вложений
-    # по всему Estate (Estate LV + EU + East).
-    # Реализовано через отдельную ветку _total_investments_for_block
-    # для консолидированного блока — чтобы не было рекурсии,
-    # здесь возвращаем 0, а в _total_investments_for_block
-    # обрабатываем отдельно.
-    if block == "УК":
-        return 0.0
-    total = 0.0
-    for obj in config.BLOCK_SOURCES[block].get("opiu_objects", []) or []:
-        clean = obj.split(" [")[0].strip()
-        if not clean:
-            continue
-        for inv_name, inv_val in investments.items():
-            if clean == inv_name or clean in inv_name or inv_name in clean:
-                total += float(inv_val or 0.0)
-                break
-    return total
-
-
-def _total_investments_for_block(block, investments, cache):
-    if block in cache:
-        return cache[block]
-
-    # >>> ДОБАВЛЕНО:
-    # Для блока «УК» нужно вернуть ОБЩУЮ сумму вложений
-    # по всему Estate (Estate LV + EU + East). Это делается
-    # через рекурсивный вызов для консолидированного блока.
-    if block == "УК":
-        total = _total_investments_for_block(
-            "ESTATE КОНСОЛИДИРОВАННЫЙ", investments, cache
-        )
-        cache[block] = total
-        if config.DEBUG:
-            print(f"[invest] УК = {total} (взято из ESTATE КОНСОЛИДИРОВАННЫЙ)")
-        return total
-
-    if block in config.BLOCK_SOURCES:
-        total = _investments_for_simple_block(block, investments)
-        cache[block] = total
-        if config.DEBUG and total > 0:
-            print(f"[invest] {block} = {total}")
-        return total
-    if block in config.TEMPLATE_CONSOLIDATION:
-        total = 0.0
-        for sub in config.TEMPLATE_CONSOLIDATION[block]:
-            total += _total_investments_for_block(sub, investments, cache)
-        cache[block] = total
-        if config.DEBUG:
-            print(f"[invest] {block} = {total} (сумма по подблокам)")
-        return total
-    cache[block] = 0.0
-    return 0.0
-
-
-# ============================================================
-# СБОР ДАННЫХ ПО БЛОКАМ
-# ============================================================
-
-def _collect_block(block, sources):
-    if block not in sources:
-        raise KeyError(f"Блок '{block}' не найден в BLOCK_SOURCES")
-
-    src = sources[block]
-    result = _empty_period()
-    row_map = config.TEMPLATE_ROW_MAP
-
-    if src["opiu_file"]:
-        path_prev = config.OPIU_FILES[src["opiu_file"]].get(config.PREV_MONTH)
-        month_ru = config.MONTHS_RU.get(config.PREV_MONTH, "")
-        result["prev_fact"] = _parse_opiu_safe(
-            path_prev, src["opiu_objects"] or [], row_map,
-            month_name_ru=month_ru,
-        )
-
-    if src["bdr_file"] and src["bdr_objects"]:
-        path_bdr = config.BDR_FILES.get(src["bdr_file"])
-        result["plan_year"] = _parse_bdr_safe(
-            path_bdr, src["bdr_objects"], config.REPORT_MONTH, row_map
-        )
-
-    if src["forecast_file"] and src["forecast_sheet"]:
-        path_fc = config.FORECAST_FILES.get(src["forecast_file"])
-        result["plan_month"] = _parse_forecast_safe(
-            path_fc, src["forecast_sheet"], config.REPORT_MONTH, row_map
-        )
-
-    if src["opiu_file"]:
-        path_cur = config.OPIU_FILES[src["opiu_file"]].get(config.REPORT_MONTH)
-        month_ru = config.MONTHS_RU.get(config.REPORT_MONTH, "")
-        result["fact_month"] = _parse_opiu_safe(
-            path_cur, src["opiu_objects"] or [], row_map,
-            month_name_ru=month_ru,
-        )
-
-    if src["forecast_file"] and src["forecast_sheet"]:
-        path_fc = config.FORECAST_FILES.get(src["forecast_file"])
-        result["next_forecast"] = _parse_forecast_safe(
-            path_fc, src["forecast_sheet"], config.NEXT_MONTH, row_map
-        )
-
-    # ----------------------------------------------------------
-    # Сбор НДС для строки «Выручка с НДС»
-    # ----------------------------------------------------------
-    vat = result["vat"]
-    objects = src.get("opiu_objects") or []
-
-    # C — факт прошлого месяца: НДС из файлов НДС за прошлый месяц
-    vat["prev_fact"] = _parse_vat_safe(
-        config.PREV_YEAR, config.PREV_MONTH, objects
-    )["НДС"]
-
-    # H — факт текущего месяца: НДС из файлов НДС за текущий месяц
-    vat["fact_month"] = _parse_vat_safe(
-        config.REPORT_YEAR, config.REPORT_MONTH, objects
-    )["НДС"]
-
-    # E — план года: НДС из БДиР
-    if src.get("bdr_file"):
-        path_bdr = config.BDR_FILES.get(src["bdr_file"])
-        vat["plan_year"] = _parse_vat_ref_bdr_safe(
-            path_bdr, config.REPORT_MONTH, block, objects
-        )
-
-    # F — план месяца: НДС из Прогнозов
-    if src.get("forecast_file") and src.get("forecast_sheet"):
-        path_fc = config.FORECAST_FILES.get(src["forecast_file"])
-        vat["plan_month"] = _parse_vat_ref_forecast_safe(
-            path_fc, src["forecast_sheet"], config.REPORT_MONTH, block, objects
-        )
-
-    # J — прогноз будущего: НДС из Прогнозов
-    if src.get("forecast_file") and src.get("forecast_sheet"):
-        path_fc = config.FORECAST_FILES.get(src["forecast_file"])
-        vat["next_forecast"] = _parse_vat_ref_forecast_safe(
-            path_fc, src["forecast_sheet"], config.NEXT_MONTH, block, objects
-        )
-
-    return result
-
-
-def _consolidate(source_blocks, collected):
-    result = _empty_period()
-    for period in result.keys():
-        if period == "vat":
-            # Складываем НДС по подблокам: None + число = число.
-            for vat_key in result["vat"].keys():
-                parts = [
-                    collected[b]["vat"].get(vat_key)
-                    for b in source_blocks
-                    if b in collected and "vat" in collected[b]
-                ]
-                parts = [p for p in parts if p is not None]
-                if parts:
-                    result["vat"][vat_key] = sum(parts)
-            continue
-
-        for b in source_blocks:
-            if b not in collected:
-                continue
-            result[period] = _sum_dicts(result[period], collected[b][period])
-    return result
-
-
-def collect_all_blocks(template_name):
-    blocks = config.TEMPLATE_BLOCKS[template_name]
-    collected = {}
-
-    for b in blocks:
-        if b in config.BLOCK_SOURCES and b not in config.TEMPLATE_CONSOLIDATION:
-            if config.DEBUG:
-                print(f"[collect] простой блок: {b}")
-            collected[b] = _collect_block(b, config.BLOCK_SOURCES)
-
-    for b in blocks:
-        if b not in config.TEMPLATE_CONSOLIDATION:
-            continue
-        if b in collected:
-            continue
-        sources_b = config.TEMPLATE_CONSOLIDATION[b]
-        missing = [s for s in sources_b if s not in collected]
-        if missing:
-            raise RuntimeError(f"Блок '{b}' зависит от {missing}, но они не собраны.")
-        if config.DEBUG:
-            print(f"[collect] консолидированный: {b} ← {sources_b}")
-        collected[b] = _consolidate(sources_b, collected)
-
-    return collected
-
-
-# ============================================================
-# СПИСОК КЛЮЧЕЙ ВЫРУЧКИ
-# ============================================================
-
-_REVENUE_KEYS = [k for k in config.TEMPLATE_ROW_MAP if k.startswith("Выручка")]
-
-
-def _revenue_sum(block_data, period):
-    d = block_data.get(period, {})
-    return sum(float(d.get(k, 0.0) or 0.0) for k in _REVENUE_KEYS)
-
-
-# ============================================================
-# ПОИСК ЗАГОЛОВКА БЛОКА В ШАБЛОНЕ
-# ============================================================
-
-def _find_block_start(ws, block_name):
-    target = _norm_for_compare(block_name)
-    for r in range(1, ws.max_row + 1):
-        a_val = ws.cell(row=r, column=1).value
-        if a_val is None:
-            continue
-        if not (isinstance(a_val, str) and _norm_for_compare(a_val) == "№п/п"):
-            continue
-        b_val = ws.cell(row=r, column=2).value
-        if b_val is None:
-            continue
-        if _norm_for_compare(b_val) == target:
-            return r
-    return 0
-
-
-def _find_block_end(ws, block_start):
-    """
-    Возвращает номер последней строки блока
-    (строки перед следующим заголовком '№ п/п').
-    """
-    end_row = block_start
-    for r in range(block_start + 2, ws.max_row + 1):
-        a = ws.cell(row=r, column=1).value
-        if a is not None and _norm_for_compare(a) == "№п/п":
-            break
-        end_row = r
-    return end_row
-
-
-# ============================================================
-# ОБНОВЛЕНИЕ ДАТ В ШАПКЕ БЛОКА (СТРОКА 2)
-# ============================================================
-
-_MONTHS_RU_CAP = {
-    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
-    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
-    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
-}
-
-
-def _fmt_period(year, month):
-    name = _MONTHS_RU_CAP.get(month, str(month))
-    return f"{name} {year}"
-
-
-def _write_block_header_dates(ws, block_start):
-    header_row = block_start + 1
-
-    if config.REPORT_MONTH is None or config.REPORT_YEAR is None:
-        return
-
-    prev_year  = config.PREV_YEAR  if config.PREV_YEAR  else config.REPORT_YEAR
-    prev_month = config.PREV_MONTH if config.PREV_MONTH else config.REPORT_MONTH
-    next_year  = config.NEXT_YEAR  if config.NEXT_YEAR  else config.REPORT_YEAR
-    next_month = config.NEXT_MONTH if config.NEXT_MONTH else config.REPORT_MONTH
-
-    text_prev = _fmt_period(prev_year, prev_month)
-    text_rep  = _fmt_period(config.REPORT_YEAR, config.REPORT_MONTH)
-    text_next = _fmt_period(next_year, next_month)
-
-    ws.cell(row=header_row, column=3).value  = text_prev
-    ws.cell(row=header_row, column=6).value  = text_rep
-    ws.cell(row=header_row, column=8).value  = text_rep
-    ws.cell(row=header_row, column=10).value = text_next
-
-    if config.DEBUG:
-        print(f"[header] блок {block_start}: "
-              f"C2={text_prev!r} F2={text_rep!r} "
-              f"H2={text_rep!r} J2={text_next!r}")
-
-
-# ============================================================
-# СЛОВАРЬ КОРОТКИХ ИМЁН → ПОЛНЫХ КЛЮЧЕЙ TEMPLATE_ROW_MAP
-# ============================================================
-
-_SHORT_TO_FULL = {
-    # ============================================================
-    # ФОТ и налоги (важно для шаблона Unelma и ОПиУ Unelma/Nomiqa)
-    # ============================================================
-    # Строка "- ФОТ" в шаблоне Unelma после _norm_for_compare
-    # превращается в "-фот" (дефис сохраняется, пробелы убираются).
-    "-фот": "Зарплата",
-    "- фот": "Зарплата",
-    "фот": "Зарплата",
-    "фотпроизводственногоперсонала": "Зарплата",
-    "фоткоммерческогоперсонала": "Зарплата",
-    "фот[сделки]": "Зарплата",
-
-    "-налоги": "НДФЛ",
-    "- налоги": "НДФЛ",
-    "налоги": "НДФЛ",
-    "взносывфонды": "НДФЛ",
-
-    # ============================================================
-    # Выручка Nomiqa (в ОПиУ августа статьи называются иначе)
-    # ============================================================
-    "выручкаbnq_baku-nomiqa": "Выручка от продажи недвижимости",
-    "выручкаdnq_dubai-nomiqa": "Выручка от продажи недвижимости",
-    "выручкаenq_europe-nomiqa": "Выручка от продажи недвижимости",
-    "выручкаuk_latvia": "Выручка от аренды",
-    "выручкаук_latvia": "Выручка от аренды",
-
-    # ============================================================
-    # Выручка (общие)
-    # ============================================================
-    "выручкаотаренды": "Выручка от аренды",
-    "выручкаотвозмещениекоммунальныхуслуг": "Выручка от возмещение коммунальных услуг",
-    "выручкаотвозмещениякоммунальныхуслуг": "Выручка от возмещение коммунальных услуг",
-    "выручкаотпродажинедвижимости": "Выручка от продажи недвижимости",
-    "выручкапродажанедвижимости": "Выручка от продажи недвижимости",
-    "выручкапродожанедвижимости": "Выручка от продажи недвижимости",
-    "выручкаподополнительным услугам": "Выручка по дополнительным услугам",
-    "выручкаподополнительнымуслугам": "Выручка по дополнительным услугам",
-    "выручкапостроительным проектам": "Выручка строительных проектов",
-    "выручкапостроительныхпроектов": "Выручка строительных проектов",
-
-    # ============================================================
-    # Расходы (общие)
-    # ============================================================
-    "налоги": "НДФЛ",
-    "коммунальныерасходы": "1.2.10 Коммунальные платежи",
-    "налогнанедвижимость": "1.2.16.1 Налог на недвижимость",
-    "рко": "1.2.17 РКО",
-    "комиссиявнешнимриэлторам и партнерам": "1.2.6 Комиссия внешним риэлторам и партнерам",
-    "комиссиявнешнимриэлторамипартнерам": "1.2.6 Комиссия внешним риэлторам и партнерам",
-    "закупки,обслуживаниеиремонт:": "1.2.1 Закупка до 1000 евро",
-    "закупкиобслуживаниеиремонт": "1.2.1 Закупка до 1000 евро",
-    "бытовоеоборудование,инвентарь": "1.2.1.1 Бытовое оборудование, инвентарь",
-    "бытовоеоборудованиеинвентарь": "1.2.1.1 Бытовое оборудование, инвентарь",
-    "мебель": "1.2.1.2 Мебель",
-    "оргтехника": "1.2.1.3 Оргтехника",
-    "хоз.принадлежности": "1.2.1.4 Хоз.принадлежности",
-    "хозпринадлежности": "1.2.1.4 Хоз.принадлежности",
-    "прочиемелкиетмц": "1.2.1.5 Прочие мелкие ТМЦ",
-    "обслуживаниеобъектов(бытовыевопросы,безремонта)": "1.2.8.1 Обслуживание объектов (бытовые вопросы, без ремонта)",
-    "обслуживаниеобъектов": "1.2.8.1 Обслуживание объектов (бытовые вопросы, без ремонта)",
-    "страхование": "1.2.8.2 Страхование",
-    "ремонттекущий": "1.2.22 Ремонт текущий",
-    "командировки": "1.2.2 Командировочные расходы",
-    "объявление,реклама": "1.2.3.1 Платное продвижение - Instagram",
-    "объявлениереклама": "1.2.3.1 Платное продвижение - Instagram",
-    "такси": "1.2.5.2 Трансфер сотрудников, такси",
-    "трансферсотрудников,такси": "1.2.5.2 Трансфер сотрудников, такси",
-    "расходынаперсонал": "1.2.5.4 Прочие расходы на персонал",
-    "бухгалтер": "1.2.12 Бухгалтер",
-    "интернет,программы,телефоны": "1.2.9.1 Связь , интернет, TV",
-    "интернетпрограммытелефоны": "1.2.9.1 Связь , интернет, TV",
-    "представительскиерасходы": "1.2.11 Представительские расходы",
-    "арендаофиса": "1.2.21.1 Аренда офиса",
-    "покупкивофис": "1.2.21.2 Административные офисные расходы",
-    "коммунальныеофисныерасходы": "1.2.21.3 Коммунальные офисные расходы",
-    "налогнаприбыль": "1.2.16.2 Налог на прибыль",
-    "ячейки": "1.2.18 Банковская комиссия за использование ячейки",
-    "лицензии,госпошлины,разрешения": "1.2.20 Лицензии, гос.пошлины, разрешения",
-    "лицензиигоспошлиныразрешения": "1.2.20 Лицензии, гос.пошлины, разрешения",
-    "непредвиденныерасходы": "1.2.33 Непредвиденные расходы",
-    "вознаграждениеинвестора": "1.2.34 Вознаграждение инвестора",
-    "расходыпосодержаниюавтотранспорта": "1.2.19 Расходы по содержанию автотранспорта",
-    "юридическиеуслуги(голландия)": "1.2.13 Юридические услуги (Голландия)",
-    "юридическиеуслугиголландия": "1.2.13 Юридические услуги (Голландия)",
-    "юридическиеуслуги": "1.2.14 Юридические услуги",
-    "возвратыклиентам": "1.2.23 Возвраты клиентам",
-    "транспортныеуслуги": "1.2.25 Транспортные услуги",
-    "сайты(разработкаиобслуживание)": "1.2.30 Сайты (разработка и обслуживание)",
-    "сайтыразработкаиобслуживание": "1.2.30 Сайты (разработка и обслуживание)",
-    "оффлайнмероприятия": "1.2.31 Оффлайн мероприятия",
-    "консультационныеуслуги": "1.2.7 Консультационные услуги",
-    "туристическийналог": "1.2.16.4 Туристический налог",
-    "расходыпонаправлениюunelma": "1.2.36 Расходы по направлению",
-    "маркетинговыерасходы": "1.2.3.1 Платное продвижение - Instagram",
-}
-
-
-def _strip_prefix(title):
-    """
-    Убирает префикс «2.1.1. », «· », «- » и т.п.
-    Для известных коротких имён возвращает полный ключ из TEMPLATE_ROW_MAP.
-
-    Логика проверок (по порядку):
-      1. Сырая строка целиком (например, "- ФОТ" → "-фот").
-      2. Сырая строка без ведущих «·».
-      3. Без нумерации «2.1.1. » (но с дефисом, если он есть).
-      4. Без нумерации и без ведущего дефиса «- ».
-      5. Если ничего не найдено — возвращаем строку без нумерации.
-    """
-    raw = str(title).strip()
-
-    # 1) Сырая строка целиком
-    raw_norm = _norm_for_compare(raw)
-    if raw_norm in _SHORT_TO_FULL:
-        return _SHORT_TO_FULL[raw_norm]
-
-    # 2) Убираем ведущие «·»
-    t1 = raw.lstrip("·").strip()
-    t1_norm = _norm_for_compare(t1)
-    if t1_norm in _SHORT_TO_FULL:
-        return _SHORT_TO_FULL[t1_norm]
-
-    # 3) Убираем нумерацию «2.1.1. »
-    t2 = re.sub(r"^\d+(\.\d+)*\.\s*", "", t1).strip()
-    t2_norm = _norm_for_compare(t2)
-    if t2_norm in _SHORT_TO_FULL:
-        return _SHORT_TO_FULL[t2_norm]
-
-    # 4) Убираем ведущий дефис «- »
-    t3 = re.sub(r"^[-–—]\s*", "", t2).strip()
-    t3_norm = _norm_for_compare(t3)
-    if t3_norm in _SHORT_TO_FULL:
-        return _SHORT_TO_FULL[t3_norm]
-
-    # 5) Ничего не нашли — возвращаем строку без нумерации
-    #    (нормализованную, чтобы дальше можно было искать в TEMPLATE_ROW_MAP)
-    return t2
-
-
-def _is_formula(cell):
-    v = cell.value
-    return isinstance(v, str) and v.startswith("=")
-
-
-# ============================================================
-# ОПРЕДЕЛЕНИЕ СЕКЦИЙ (доход / расход / стоп)
-# ============================================================
-# Используется в _write_block, чтобы понять, в какой секции
-# находится строка: доход, расход или стоп (конец таблицы).
-#
-#   - "доход"  — строки выручки (значения не инвертируются);
-#   - "расход" — строки расходов (значения берутся по модулю);
-#   - "стоп"   — агрегатные строки (Валовая Прибыль, Рентабельность,
-#                ROI, Вложенные средства), после которых цикл
-#                _write_block прерывается.
-# ============================================================
-
-_SECTION_MARKERS = {
-    "выручка": "доход",
-    "расходы": "расход",
-    "прочиерасходы": "расход",
-    "валоваяприбыль": "стоп",
-    "рентабельность": "стоп",
-    "roiнавложенныесредства,вмесяц": "стоп",
-    "roiнавложенныесредствавмесяц": "стоп",
-    "планируемыйroiнагод": "стоп",
-    "вложенныесредстванаобъекты": "стоп",
-}
-
-
-def _detect_section(title_raw):
-    """
-    Определяет секцию строки по её названию.
-    Возвращает 'доход', 'расход', 'стоп' или None.
-    """
-    t = str(title_raw).strip().lstrip("·").strip()
-    if t.startswith("- "):
-        t = t[2:].strip()
-    t = re.sub(r"^\d+(\.\d+)*\.\s*", "", t).strip()
-    return _SECTION_MARKERS.get(_norm_for_compare(t))
-
-
-# ============================================================
-# КЛАССИФИКАЦИЯ ФОРМУЛ
-# ============================================================
-# Формулы-агрегаты — это формулы, которые Excel должен
-# пересчитывать сам из подстрок или из других ячеек.
-# Их НЕЛЬЗЯ перезаписывать значениями парсера.
-#
-# Признаки агрегата:
-#   1) =SUM(...)            — сумма диапазона
-#   2) =SUMIF(...)          — сумма по условию
-#   3) =A1+B1+C1+...        — арифметика из ссылок
-#   4) =A1-B1, =A1*B1, ...  — арифметика из двух ссылок
-#   5) =IFERROR(...)        — обёртка, но внутри обычно ссылка
-#
-# Простая формула-ссылка — это =A1 (одна ссылка без арифметики).
-# Битая формула — содержит #REF!, #ДЕЛ/0!, #ЗНАЧ! и т.п.
-# ============================================================
-
-_AGGREGATE_PATTERNS = [
-    re.compile(r"^=\s*SUM\s*\(", re.IGNORECASE),
-    re.compile(r"^=\s*SUMIF\s*\(", re.IGNORECASE),
-    re.compile(r"^=\s*SUMIFS\s*\(", re.IGNORECASE),
-    re.compile(r"^=\s*IFERROR\s*\(\s*SUM", re.IGNORECASE),
-    re.compile(
-        r"^=\s*IFERROR\s*\(\s*\$?[A-Z]+\$?\d+\s*[+\-*/]\s*\$?[A-Z]+\$?\d+",
-        re.IGNORECASE,
-    ),
-]
-
-_ARITHMETIC_RE = re.compile(
-    r"^=\s*\$?[A-Z]+\$?\d+\s*[+\-*/]\s*\$?[A-Z]+\$?\d+",
-    re.IGNORECASE,
-)
-
-_BROKEN_TOKENS = ("#REF!", "#ДЕЛ/0!", "#ЗНАЧ!", "#ИМЯ?", "#ЧИСЛО!", "#ПУСТО!", "#Н/Д")
-
-_SIMPLE_REF_RE = re.compile(
-    r"^=\s*\$?[A-Z]+\$?\d+\s*$",
-    re.IGNORECASE,
-)
-
-
-def _is_aggregate_formula(cell):
-    """
-    Формула-агрегат: =SUM(...), =SUMIF(...), =A1+B1, =C4+C5+C6,
-    =SUM(...)-C23, =IFERROR(SUM(...),0) и т.п.
-    Простая ссылка =A1 агрегатом НЕ считается.
-    """
-    if not _is_formula(cell):
-        return False
-    v = cell.value.strip()
-
-    # Простая ссылка =A1 — не агрегат.
-    if _SIMPLE_REF_RE.match(v):
-        return False
-
-    # Явные агрегатные паттерны.
-    for pat in _AGGREGATE_PATTERNS:
-        if pat.match(v):
-            return True
-    if _ARITHMETIC_RE.match(v):
-        return True
-
-    # Расширенная проверка: формула содержит арифметику со ссылками
-    # (+, -, *, /) и хотя бы одну ссылку на ячейку.
-    # Покрывает =C7+C8+C9, =SUM(C7:C22)-C23 и т.п.
-    if re.search(r"[+\-*/]", v) and re.search(r"\$?[A-Z]+\$?\d+", v):
-        return True
-
-    return False
-
-def _is_broken_formula(cell):
-    if not _is_formula(cell):
-        return False
-    v = cell.value
-    return any(tok in v for tok in _BROKEN_TOKENS)
-
-
-def _is_simple_ref_formula(cell):
-    if not _is_formula(cell):
-        return False
-    return bool(_SIMPLE_REF_RE.match(cell.value.strip()))
-
-
-# ============================================================
-# ЗАПИСЬ ЗНАЧЕНИЙ В БЛОК
-# ============================================================
-
-def _write_cell(cell, val, force_overwrite=False):
-    """
-    Записывает значение в ячейку.
-
-    force_overwrite=True — перезаписывать даже агрегаты.
-    Используется для колонок E, F, J (план/прогноз), где источник —
-    Прогнозы или БДиР, и агрегатная формула шаблона может дать
-    неверный результат (0), если подстроки в источнике пустые.
-    """
-    if not config.PRESERVE_AGGREGATE_FORMULAS:
-        cell.value = val
-        return
-
-    if not _is_formula(cell):
-        cell.value = val
-        return
-
-    # Если force_overwrite — пишем значение, даже если это агрегат,
-    # НО только если значение ненулевое. Если значение 0, а в ячейке
-    # формула-агрегат (=SUM, =E9+E8 и т.п.) — оставляем формулу,
-    # чтобы Excel сам пересчитал её из подстрок.
-    #
-    # Это важно для строк-заголовков подсекций (2.1, 2.4, 3),
-    # у которых в шаблоне формула-агрегат, а в источнике (БДиР)
-    # такой статьи нет (plan_year.get(...) = 0).
-    if force_overwrite:
-        if val == 0 and _is_aggregate_formula(cell):
-            if config.DEBUG:
-                print(f"[write_cell] сохраняю агрегат {cell.coordinate} "
-                      f"(force, val=0): {cell.value!r}")
-            return
-        cell.value = val
-        return
-
-    if _is_aggregate_formula(cell):
-        if config.DEBUG:
-            print(f"[write_cell] сохраняю агрегат {cell.coordinate}: {cell.value!r}")
-        return
-
-    if _is_broken_formula(cell):
-        cell.value = val
-        return
-
-    if _is_simple_ref_formula(cell):
-        if val == 0:
-            if config.DEBUG:
-                print(f"[write_cell] сохраняю простую ссылку "
-                      f"{cell.coordinate}: {cell.value!r} (val=0)")
-            return
-        cell.value = val
-        return
-
-    # Прочие формулы (сложные, но не агрегаты) — перезаписываем значением,
-    # потому что они, вероятно, неверные (например, =C6/$C$5 в шаблоне
-    # Unelma, где должно быть =C6/$C$3).
-    cell.value = val
-
-
-# Формат отображения: целое с разделителем тысяч.
-# Значение ячейки остаётся дробным (с копейками), меняется
-# только то, как Excel показывает число на экране.
-_NUMBER_FORMAT = '#,##0'
-
-
-def _apply_number_format(cell):
-    """Ставит ячейке формат «целое с разделителем тысяч».
-    Само значение ячейки не трогает."""
-    try:
-        cell.number_format = _NUMBER_FORMAT
-    except Exception:
-        # Если по какой-то причине не получилось — не падаем,
-        # просто оставляем формат по умолчанию.
-        pass
-
-
-def _safe_set_value(ws, row, col, value):
-    """
-    Безопасно записывает значение в ячейку.
-
-    Проблема: в Excel-шаблоне есть ОБЪЕДИНЁННЫЕ ячейки (merged).
-    openpyxl представляет все ячейки диапазона, кроме верхней левой,
-    объектами MergedCell. У них атрибут .value — read-only, и запись
-    вызывает ошибку: 'MergedCell' object attribute 'value' is read-only.
-
-    Решение: если ячейка — MergedCell, находим верхнюю левую ячейку
-    её диапазона и пишем в неё. Если не удалось — тихо пропускаем.
-
-    Возвращает True, если запись удалась, иначе False.
-    """
-    cell = ws.cell(row=row, column=col)
-
-    # Быстрая проверка: обычная ячейка (не MergedCell)?
-    if type(cell).__name__ != "MergedCell":
-        try:
-            cell.value = value
-            return True
-        except AttributeError:
-            # На всякий случай — вдруг всё-таки MergedCell.
-            pass
-
-    # Это MergedCell (или запись не удалась). Ищем родителя.
-    for rng in ws.merged_cells.ranges:
-        if (rng.min_row <= row <= rng.max_row
-                and rng.min_col <= col <= rng.max_col):
-            top_left = ws.cell(row=rng.min_row, column=rng.min_col)
-            try:
-                top_left.value = value
-                return True
-            except AttributeError:
-                return False
-
-    # Не MergedCell, но запись не удалась по другой причине.
-    return False
-
-
-def _safe_apply_format(ws, row, col):
-    """
-    Безопасно применяет формат к ячейке. Для MergedCell — к верхней
-    левой ячейке диапазона.
-    """
-    cell = ws.cell(row=row, column=col)
-    if type(cell).__name__ != "MergedCell":
-        _apply_number_format(cell)
-        return
-
-    for rng in ws.merged_cells.ranges:
-        if (rng.min_row <= row <= rng.max_row
-                and rng.min_col <= col <= rng.max_col):
-            top_left = ws.cell(row=rng.min_row, column=rng.min_col)
-            _apply_number_format(top_left)
-            return
-
-
-def _write_vat_row(ws, r, block_data):
-    """
-    Заполняет строку «Выручка с НДС» в блоке.
-
-    Логика:
-      - если выручка без НДС = 0 → пишем пусто;
-      - для каждой колонки отдельно проверяем, попадает ли её МЕСЯЦ
-        в диапазон НДС (>= сентябрь 2026):
-          * если ДА  → пишем «Выручка без НДС + НДС»;
-          * если НЕТ → пишем «= Выручка без НДС» (НДС = 0).
-
-    ВАЖНО: месяц каждой колонки определяется отдельно:
-      C — прошлый месяц (PREV_YEAR, PREV_MONTH)
-      E — отчётный месяц (REPORT_YEAR, REPORT_MONTH)
-      F — отчётный месяц (REPORT_YEAR, REPORT_MONTH)
-      H — отчётный месяц (REPORT_YEAR, REPORT_MONTH)
-      J — следующий месяц (NEXT_YEAR, NEXT_MONTH)
-    """
-    from_periods = (
-        (3,  "prev_fact",     config.PREV_YEAR,   config.PREV_MONTH),
-        (5,  "plan_year",     config.REPORT_YEAR, config.REPORT_MONTH),
-        (6,  "plan_month",    config.REPORT_YEAR, config.REPORT_MONTH),
-        (8,  "fact_month",    config.REPORT_YEAR, config.REPORT_MONTH),
-        (10, "next_forecast", config.NEXT_YEAR,   config.NEXT_MONTH),
-    )
-
-    revenue_keys = [k for k in config.TEMPLATE_ROW_MAP
-                    if k.startswith("Выручка")]
-
-    vat_start = (config.VAT_START_YEAR, config.VAT_START_MONTH)
-
-    for col_idx, period, y, m in from_periods:
-        base = sum(
-            float(block_data.get(period, {}).get(k, 0.0) or 0.0)
-            for k in revenue_keys
-        )
-
-        if base == 0:
-            cell = ws.cell(row=r, column=col_idx)
-            if type(cell).__name__ != "MergedCell":
-                cell.value = None
-            continue
-
-        # Для каждой колонки своя проверка месяца
-        is_vat_active = (y, m) >= vat_start
-
-        vat_add = 0.0
-        if is_vat_active:
-            vat_val = block_data.get("vat", {}).get(period)
-            if vat_val is not None:
-                vat_add = float(vat_val)
-
-        value = abs(base) + abs(vat_add)
-
-        cell = ws.cell(row=r, column=col_idx)
-        if type(cell).__name__ == "MergedCell":
-            _safe_set_value(ws, r, col_idx, value)
-            _safe_apply_format(ws, r, col_idx)
-        else:
-            # force_overwrite=True — строка «Выручка с НДС» должна
-            # перезаписывать формулу шаблона (=SUM(...)),
-            # иначе получится «Выручка с НДС» = «Выручка без НДС».
-            _write_cell(cell, value, force_overwrite=True)
-            _apply_number_format(cell)
-
-        if config.DEBUG:
-            print(f"[VAT] стр.{r} кол.{col_idx}: {y}-{m:02d} "
-                  f"выручка={base} НДС={vat_add} → {value}")
-
-
-def _write_block(ws, block_start, block_data, investments_amount):
-    if config.DEBUG:
-        print(f"[write] блок начинается в строке {block_start}")
-
-    end_row = _find_block_end(ws, block_start)
-
-    if config.DEBUG:
-        print(f"[write] конец блока: строка {end_row}")
-
-    prev = block_data["prev_fact"]
-    plan_year = block_data["plan_year"]
-    plan_month = block_data["plan_month"]
-    fact_month = block_data["fact_month"]
-    next_fc = block_data["next_forecast"]
-
-    skip_titles_norm = {_norm_for_compare(x) for x in (
-        "Валовая Прибыль", "Рентабельность",
-        "ROI на вложенные средства, в месяц",
-        "ПЛАНИРУЕМЫЙ  ROI на ГОД", "ПЛАНИРУЕМЫЙ ROI на ГОД",
-        "Вложенные средства на объекты",
-    )}
-
-    current_section = None
-
-    for r in range(block_start + 1, end_row + 1):
-        title_raw = ws.cell(row=r, column=2).value
-        if title_raw is None:
-            continue
-
-        section = _detect_section(title_raw)
-        if section == "стоп":
-            break
-        if section is not None:
-            current_section = section
-            continue
-
-        title = _strip_prefix(title_raw)
-        if not title:
-            continue
-        if _norm_for_compare(title) in skip_titles_norm:
-            continue
-
-        # --- СПЕЦИАЛЬНАЯ ОБРАБОТКА СТРОКИ «ВЫРУЧКА С НДС» ---
-        if _norm_for_compare(_strip_prefix(title_raw)) == \
-                _norm_for_compare(config.VAT_ROW_TITLE):
-            _write_vat_row(ws, r, block_data)
-            continue
-
-        # ДИАГНОСТИКА: показываем, что именно пишем в строку «Зарплата».
-        # Помогает найти, почему в отчёте 0 вместо ожидаемого значения.
-        if config.DEBUG and _norm_for_compare(title) == _norm_for_compare("Зарплата"):
-            print(f"[write_block] строка {r}: title_raw={title_raw!r}, "
-                  f"title={title!r}, "
-                  f"prev={prev.get(title, 0.0)}, "
-                  f"plan_year={plan_year.get(title, 0.0)}, "
-                  f"plan_m={plan_month.get(title, 0.0)}, "
-                  f"fact_m={fact_month.get(title, 0.0)}, "
-                  f"next_fc={next_fc.get(title, 0.0)}")
-
-        val_prev      = float(prev.get(title, 0.0) or 0.0)
-        val_plan_year = float(plan_year.get(title, 0.0) or 0.0)
-        val_plan_m    = float(plan_month.get(title, 0.0) or 0.0)
-        val_fact_m    = float(fact_month.get(title, 0.0) or 0.0)
-        val_next_fc   = float(next_fc.get(title, 0.0) or 0.0)
-
-        if current_section in ("расход", "доход"):
-            val_prev      = abs(val_prev)
-            val_plan_year = abs(val_plan_year)
-            val_plan_m    = abs(val_plan_m)
-            val_fact_m    = abs(val_fact_m)
-            val_next_fc   = abs(val_next_fc)
-
-        for col_idx, val, force in (
-            (3, val_prev, False),        # C — факт прошлого месяца (ОПиУ)
-            (5, val_plan_year, True),    # E — план года (БДиР) — перезаписываем агрегаты
-            (6, val_plan_m, True),       # F — план месяца (Прогнозы) — перезаписываем агрегаты
-            (8, val_fact_m, False),      # H — факт текущего месяца (ОПиУ)
-            (10, val_next_fc, True),     # J — прогноз будущего (Прогнозы) — перезаписываем агрегаты
-        ):
-            cell = ws.cell(row=r, column=col_idx)
-            if type(cell).__name__ == "MergedCell":
-                _safe_set_value(ws, r, col_idx, val)
-                _safe_apply_format(ws, r, col_idx)
-            else:
-                _write_cell(cell, val, force_overwrite=force)
-                _apply_number_format(cell)
-
-    for r in range(block_start, end_row + 1):
-        title_raw = ws.cell(row=r, column=2).value
-        if title_raw is None:
-            continue
-        if _norm_for_compare(_strip_prefix(title_raw)) == _norm_for_compare("Вложенные средства на объекты"):
-            # >>> ИЗМЕНЕНО: вложения пишем ТОЛЬКО в колонку C.
-            # Раньше писали во все колонки (C, E, F, H, J) — это нужно
-            # было для ROI блока «УК», но визуально неправильно:
-            # вложения не меняются от месяца к месяцу.
-            #
-            # Для блока «УК» ROI будет считаться по колонке C
-            # (см. _fix_uk_formulas), поэтому E/F/H/J там не нужны.
-            _safe_set_value(ws, r, 3, investments_amount or 0.0)
-            break
-
-    # Применяем числовой формат «целое с разделителем тысяч» ко всем
-    # числовым ячейкам блока. Это НЕ меняет хранимые значения —
-    # только то, как Excel показывает число (без копеек).
-    for r in range(block_start, end_row + 1):
-        for c in range(3, 17):   # C..P
-            cell = ws.cell(row=r, column=c)
-            if type(cell).__name__ == "MergedCell":
-                _safe_apply_format(ws, r, c)
-            else:
-                _apply_number_format(cell)
-
-    # >>> Процентный формат для строк «Рентабельность», «ROI», «ПЛАНИРУЕМЫЙ ROI».
-    pct_titles_norm = {
-        _norm_for_compare("Рентабельность"),
-        _norm_for_compare("ROI на вложенные средства, в месяц"),
-        _norm_for_compare("ПЛАНИРУЕМЫЙ ROI на ГОД"),
-        _norm_for_compare("ПЛАНИРУЕМЫЙ  ROI на ГОД"),
-    }
-    for r in range(block_start, end_row + 1):
-        title_raw = ws.cell(row=r, column=2).value
-        if title_raw is None:
-            continue
-        t_norm = _norm_for_compare(_strip_prefix(title_raw))
-        if t_norm not in pct_titles_norm:
-            continue
-        for c in (3, 5, 6, 8, 10):
-            cell = ws.cell(row=r, column=c)
-            if type(cell).__name__ == "MergedCell":
-                continue
-            try:
-                cell.number_format = '0.00%'
-            except Exception:
-                pass
-
-
-
-# ============================================================
-# ДЕТАЛИЗАЦИЯ СТРОК
-# ============================================================
-
-def _write_detailed_rows(ws, block, block_start, collected):
-    if block not in config.DETAILED_CONSOLIDATION:
-        return
-    detail_map = config.DETAILED_CONSOLIDATION[block]
-    detail_map_norm = {_norm_for_compare(k): v for k, v in detail_map.items()}
-
-    end_row = _find_block_end(ws, block_start)
-
-    for r in range(block_start + 1, end_row + 1):
-        title_raw = ws.cell(row=r, column=2).value
-        if title_raw is None:
-            continue
-        title = _strip_prefix(title_raw)
-        title_norm = _norm_for_compare(title)
-        if title_norm not in detail_map_norm:
-            continue
-
-        source_block = detail_map_norm[title_norm]
-        if source_block not in collected:
-            continue
-
-        src_data = collected[source_block]
-        vals = {
-            "prev_fact":     _revenue_sum(src_data, "prev_fact"),
-            "plan_year":     _revenue_sum(src_data, "plan_year"),
-            "plan_month":    _revenue_sum(src_data, "plan_month"),
-            "fact_month":    _revenue_sum(src_data, "fact_month"),
-            "next_forecast": _revenue_sum(src_data, "next_forecast"),
-        }
-        for col_idx, val in (
-            (3, vals["prev_fact"]),
-            (5, vals["plan_year"]),
-            (6, vals["plan_month"]),
-            (8, vals["fact_month"]),
-            (10, vals["next_forecast"]),
-        ):
-            cell = ws.cell(row=r, column=col_idx)
-            if type(cell).__name__ == "MergedCell":
-                _safe_set_value(ws, r, col_idx, val)
-            else:
-                _write_cell(cell, val)
-                _apply_number_format(cell)
-
-
-# ============================================================
-# ПРИНУДИТЕЛЬНОЕ ИСПРАВЛЕНИЕ ФОРМУЛЫ «ВАЛОВАЯ ПРИБЫЛЬ»
-# ============================================================
-
-def _fix_valovaya_pribyl_formulas(ws, block_start):
-    vp_row = None
-    for r in range(block_start + 1, ws.max_row + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
-            continue
-        a_val = ws.cell(row=r, column=1).value
-        if a_val is not None and _norm_for_compare(a_val) == "№п/п" and r != block_start:
-            break
-        if _norm_for_compare(_strip_prefix(title)) == _norm_for_compare("Валовая Прибыль"):
-            vp_row = r
-            break
-
-    if vp_row is None:
-        return
-
-    revenue_row = None
-    expenses_row = None
-    for r in range(block_start + 1, vp_row):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
-            continue
-        t_norm = _norm_for_compare(_strip_prefix(title))
-        if t_norm == _norm_for_compare("Выручка") and revenue_row is None:
-            revenue_row = r
-        if t_norm == _norm_for_compare("Расходы") and expenses_row is None:
-            expenses_row = r
-
-    if revenue_row is None or expenses_row is None:
-        return
-
-    for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-        _safe_set_value(
-            ws, vp_row, col_idx,
-            f"={col_letter}{revenue_row}-{col_letter}{expenses_row}",
-        )
-
-    if config.DEBUG:
-        print(f"[fix VP] блок {block_start}: ВП в строке {vp_row}, "
-              f"Выручка={revenue_row}, Расходы={expenses_row}")
-
-
-# ============================================================
-# СКРЫТИЕ ПУСТЫХ СТРОК
-# ============================================================
-
-def _cell_numeric_or_none(cell):
-    v = cell.value
+def _clean(s):
+    if s is None:
+        return ""
+    s = str(s).replace("\u00a0", " ")
+    s = re.sub(r"[\s·]+$", "", s)
+    s = re.sub(r"^[\s·]+", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _level(s):
+    if s is None:
+        return 0
+    m = re.match(r"^[\s·]*", str(s))
+    return m.group(0).count("·") if m else 0
+
+
+def _num(ws, r, c):
+    v = ws.cell(row=r, column=c).value
     if v is None:
-        return None
+        return 0.0
     if isinstance(v, (int, float)):
         return float(v)
-    return None
+    s = str(v).strip().replace("\u00a0", "").replace(" ", "").replace(",", ".")
+    if s in ("", "-"):
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
 
 
-def _is_row_empty(ws, r):
-    for col in (3, 5, 6, 8, 10):
-        cell = ws.cell(row=r, column=col)
-        v = cell.value
+def _safe_sheet(name):
+    name = re.sub(r"[\\/*?:\[\]]", "_", name)
+    return name[:31]
+
+
+def _find_month_columns(ws, header_row, months):
+    result = {}
+    for c in range(2, min(ws.max_column, 25) + 1):
+        v = ws.cell(row=header_row, column=c).value
+        if v is None:
+            continue
+        if isinstance(v, (_dt.datetime, _dt.date)):
+            if v.month in months and v.month not in result:
+                result[v.month] = c
+            continue
+        sv = str(v).lower()
+        for m in months:
+            if m in result:
+                continue
+            if _MONTHS_RU_LOWER[m] in sv:
+                result[m] = c
+                break
+    return result
+
+
+# ============================================================
+# ШАГ 1. ПЛОСКИЙ СПИСОК СТРОК ОПиУ
+# ============================================================
+
+def _read_flat_rows(opiu_path, months):
+    if not opiu_path or not os.path.exists(opiu_path):
+        return [], {}
+
+    wb = openpyxl.load_workbook(opiu_path, data_only=True)
+    ws = wb.active
+
+    header_row = None
+    for r in range(1, 6):
+        hits = 0
+        for c in range(2, min(ws.max_column, 25) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            if isinstance(v, (_dt.datetime, _dt.date)):
+                hits += 1
+                continue
+            sv = str(v).lower()
+            if any(m in sv for m in _MONTHS_RU_LOWER.values()):
+                hits += 1
+        if hits >= 3:
+            header_row = r
+            break
+
+    if header_row is None:
+        print("[presentation_builder] шапка с месяцами не найдена")
+        return [], {}
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    rows = []
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        if title == "":
+            continue
+        lvl = _level(raw)
+        values = {m: _num(ws, r, col) for m, col in month_col.items()}
+        rows.append((r, lvl, title, values))
+
+    return rows, month_col
+
+
+# ============================================================
+# ШАГ 2. ИЗВЛЕЧЕНИЕ ДАННЫХ
+# ============================================================
+
+_SECTION_REVENUE = "Выручка"
+_SECTION_NET     = "Чистая прибыль"
+_SECTION_PROD    = "Производственные расходы"
+_SECTION_COMM    = "Коммерческие расходы"
+
+
+def _find_row(rows, section, unit, object_name=None):
+    cur_section = None
+    cur_unit = None
+    cur_object = None
+
+    for r, lvl, title, values in rows:
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            cur_object = None
+            continue
+
+        if lvl == 1:
+            cur_unit = title
+            cur_object = None
+            if (object_name is None
+                    and cur_section == section
+                    and cur_unit == unit):
+                return dict(values)
+            continue
+
+        if lvl == 2:
+            cur_object = title
+            if (object_name is not None
+                    and cur_section == section
+                    and cur_unit == unit
+                    and cur_object == object_name):
+                return dict(values)
+            continue
+
+    return {}
+
+
+def _is_inside_section(rows, idx, section):
+    for i in range(idx - 1, -1, -1):
+        r, lvl, title, values = rows[i]
+        if lvl == 0:
+            return title == section
+    return False
+
+
+def _find_object_fot(rows, section, unit, object_name):
+    result = {}
+
+    unit_idx = None
+    for i, (r, lvl, title, values) in enumerate(rows):
+        if title == unit:
+            if _is_inside_section(rows, i, section):
+                unit_idx = i
+                break
+    if unit_idx is None:
+        return result
+
+    obj_idx = None
+    for i in range(unit_idx + 1, len(rows)):
+        r, lvl, title, values = rows[i]
+        if lvl == 0 and title != section:
+            break
+        if title == object_name:
+            obj_idx = i
+            break
+    if obj_idx is None:
+        return result
+
+    obj_lvl = rows[obj_idx][1]
+
+    for i in range(obj_idx + 1, len(rows)):
+        r, lvl, title, values = rows[i]
+        if lvl <= obj_lvl:
+            break
+        if lvl == 0 and title != section:
+            break
+
+        tl = title.lower()
+        if "фот производственного" in tl or "фот коммерческого" in tl:
+            for m, v in values.items():
+                result[m] = result.get(m, 0.0) + v
+
+    return result
+
+
+def _collect_unit_expenses(rows, unit_name, months):
+    sections = (
+        "Производственные расходы",
+        "Косвенные расходы",
+        "Коммерческие расходы",
+    )
+    result = {m: 0.0 for m in months}
+
+    cur_section = None
+    cur_unit_level = None
+    inside_target = False
+
+    for r, lvl, title, values in rows:
+        if lvl == 0:
+            cur_section = title
+            cur_unit_level = None
+            inside_target = False
+            continue
+
+        if cur_section not in sections:
+            continue
+
+        if title == unit_name:
+            cur_unit_level = lvl
+            inside_target = True
+            continue
+
+        if not inside_target:
+            continue
+
+        if lvl <= cur_unit_level:
+            inside_target = False
+            continue
+
+        if lvl == cur_unit_level + 1:
+            for m in months:
+                v = values.get(m, 0.0) or 0.0
+                result[m] += abs(v)
+
+    return result
+
+
+def _parse_investments_all(ref_path):
+    result = {}
+    if not ref_path or not os.path.exists(ref_path):
+        return result
+
+    wb = openpyxl.load_workbook(ref_path, data_only=True)
+    ws = wb.active
+
+    for r in range(1, ws.max_row + 1):
+        name = _clean(ws.cell(row=r, column=1).value)
+        if not name:
+            continue
+
+        if "наименование" in name.lower():
+            continue
+
+        v = ws.cell(row=r, column=2).value
 
         if isinstance(v, str) and v.startswith("="):
-            return False
-
-        num = _cell_numeric_or_none(cell)
-        if num is None:
-            continue
-        if num != 0.0:
-            return False
-
-    return True
-
-
-def _hide_empty_rows(ws, template_name):
-    total_hidden = 0
-
-    for block in config.TEMPLATE_BLOCKS[template_name]:
-        start = _find_block_start(ws, block)
-        if start == 0:
             continue
 
-        end_row = _find_block_end(ws, start)
+        amount = _num(ws, r, 2)
 
-        for r in range(start + 2, end_row + 1):
-            title_raw = ws.cell(row=r, column=2).value
-            if title_raw is None:
-                continue
+        if amount == 0.0 and v in (None, "", 0):
+            if v == 0:
+                result[name] = 0.0
+            continue
 
-            title_norm = _norm_for_compare(_strip_prefix(title_raw))
-            if title_norm in {
-                "валоваяприбыль", "рентабельность",
-                "roiнавложенныесредства,вмесяц",
-                "планируемыйroiнагод",
-                "вложенныесредстванаобъекты",
-            }:
-                continue
+        result[name] = float(amount)
 
-            if _is_row_empty(ws, r):
-                ws.row_dimensions[r].hidden = True
-                total_hidden += 1
-
-    if config.DEBUG and total_hidden:
-        print(f"[hide] {template_name}: скрыто пустых строк — {total_hidden}")
+    return result
 
 
-# ============================================================
-# ПОСТПРОЦЕССИНГ ФОРМУЛ
-# ============================================================
-
-_NOMIQA_REF_FIX = [
-    ("$C$54", "$C$105"),
-    ("$E$54", "$E$105"),
-    ("$F$54", "$F$105"),
-    ("$H$54", "$H$105"),
-    ("$J$54", "$J$105"),
-]
-
-
-def _postprocess_nomiqa_formulas(ws, template_name):
-    if template_name != "Nomiqa":
-        return
-    block_name = "Nomiqa (консолидированный)"
-    start = _find_block_start(ws, block_name)
-    if start == 0:
-        return
-
-    end_row = _find_block_end(ws, start)
-
-    fixed = 0
-    for r in range(start, end_row + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
-            v = cell.value
-            if not (isinstance(v, str) and v.startswith("=")):
-                continue
-            new_v = v
-            for old, new in _NOMIQA_REF_FIX:
-                if old in new_v:
-                    new_v = new_v.replace(old, new)
-            if new_v != v:
-                _safe_set_value(ws, r, c, new_v)
-                fixed += 1
-    if config.DEBUG and fixed:
-        print(f"[postproc] Nomiqa: исправлено формул: {fixed}")
-
-
-# >>> ИЗМЕНЕНО:
-# Раньше _postprocess_unelma_formulas обрабатывал только строку 2.1
-# ("ФОТ + налоги на ФОТ") и заменял =X6/$C$3*100 на =X7/$C$3*100.
-# Но в шаблоне Unelma формулы долей выглядят как =X<n>/$C$5 (деление
-# на Расходы), а должны быть =X<n>/$C$3 (деление на Выручку).
-#
-# Теперь функция обрабатывает ВСЕ строки блока Unelma и заменяет
-# все формулы вида =X<n>/$C$5 на =X<n>/$C$3.
-#
-# Паттерн: =<col><row>/$C$5, где col ∈ {C, E, F, H, J}, row — число.
-_UNELMA_DENOM_PATTERN = re.compile(
-    r"^=(C|E|F|H|J)(\d+)(\/\$C\$5)$"
-)
-
-# На всякий случай — старый паттерн с $C$3*100 (может встретиться).
-_UNELMA_ROW21_OLD_PATTERN = re.compile(r"^=(C|E|F|H|J)(\d+)(\/\$C\$3\*100)$")
-
-
-def _postprocess_unelma_formulas(ws, template_name):
-    if template_name != "Unelma":
-        return
-    block_name = "Unelma"
-    start = _find_block_start(ws, block_name)
-    if start == 0:
-        return
-
-    end_row = _find_block_end(ws, start)
-
-    fixed_denom = 0
-    fixed_old = 0
-
-    for r in range(start, end_row + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
-            v = cell.value
-            if not (isinstance(v, str) and v.startswith("=")):
-                continue
-
-            # 1) =X<n>/$C$5 → =X<n>/$C$3
-            m = _UNELMA_DENOM_PATTERN.match(v.strip())
-            if m:
-                col = m.group(1)
-                row = m.group(2)
-                _safe_set_value(ws, r, c, f"={col}{row}/$C$3")
-                fixed_denom += 1
-                continue
-
-            # 2) =X<n>/$C$3*100 → =X<n>/$C$3
-            m2 = _UNELMA_ROW21_OLD_PATTERN.match(v.strip())
-            if m2:
-                col = m2.group(1)
-                row = m2.group(2)
-                _safe_set_value(ws, r, c, f"={col}{row}/$C$3")
-                fixed_old += 1
-                continue
-
-    if config.DEBUG and (fixed_denom or fixed_old):
-        print(f"[postproc] Unelma: заменено $C$5→$C$3: {fixed_denom}, "
-              f"$C$3*100→$C$3: {fixed_old}")
-
-
-def _postprocess_formulas(ws, template_name):
-    # ВАЖНО: в новых шаблонах Estate/Unelma/Nomiqa формулы долей
-    # уже правильные (D7=C7/$C$6, G7=F7/$F$6, I7=H7/$H$6, K7=J7/$J$6).
-    # Никакой постпроцессинг не нужен — только испортим.
-    return
-
-
-# ============================================================
-# ПОСТПРОЦЕССИНГ: ДОПОЛНИТЕЛЬНАЯ КОНСОЛИДАЦИЯ СТРОК
-# ============================================================
-# Для блоков из config.EXTRA_CONSOLIDATION пересчитывает указанные
-# строки как сумму одноимённых строк из подблоков.
-#
-# Логика получения значения из подблока (в порядке приоритета):
-#   1. Если в ws лежит ЧИСЛО — берём его.
-#   2. Если в ws лежит формула =SUM(X:Y) — разворачиваем её
-#      вручную, читая значения диапазона из ws.
-#   3. Если формула другого вида — берём закешированное значение
-#      из ws_values (data_only=True).
-#   4. Если ничего не вышло — вклад 0.
-# ============================================================
-
-_SUM_FORMULA_RE = re.compile(
-    r"^\s*=\s*SUM\s*\(\s*\$?([A-Z]+)\$?(\d+)\s*:\s*\$?([A-Z]+)\$?(\d+)\s*\)\s*$",
-    flags=re.IGNORECASE,
-)
-
-
-def _col_letter_to_idx(letter):
-    """A → 1, B → 2, ..., Z → 26, AA → 27."""
-    idx = 0
-    for ch in letter.upper():
-        idx = idx * 26 + (ord(ch) - ord('A') + 1)
-    return idx
-
-
-def _extract_sum_from_formula(formula, target_ws):
-    """
-    Если формула вида =SUM(X1:X2) — считаем сумму значений
-    диапазона из target_ws. Возвращает число или None.
-    """
-    m = _SUM_FORMULA_RE.match(formula)
-    if not m:
-        return None
-    c1l, r1s, c2l, r2s = m.groups()
-    c1 = _col_letter_to_idx(c1l)
-    c2 = _col_letter_to_idx(c2l)
-    r1 = int(r1s)
-    r2 = int(r2s)
+def _sum_investments(investments_all, object_names):
     total = 0.0
-    for rr in range(r1, r2 + 1):
-        for cc in range(c1, c2 + 1):
-            v = target_ws.cell(row=rr, column=cc).value
-            if isinstance(v, (int, float)):
-                total += float(v)
-            elif isinstance(v, str):
-                s = v.strip().replace(",", ".")
-                try:
-                    total += float(s)
-                except ValueError:
-                    pass
+    for name in object_names:
+        total += investments_all.get(name, 0.0)
     return total
 
 
-def _postprocess_extra_consolidation(ws, template_name, ws_values=None):
-    rules = getattr(config, "EXTRA_CONSOLIDATION", {})
-    if not rules:
-        return
+def _parse_debts(debts_path, months):
+    result = {
+        "debts": {},
+        "headcount": {m: 0.0 for m in months},
+    }
+    if not debts_path or not os.path.exists(debts_path):
+        print(f"[_parse_debts] файл не найден: {debts_path}")
+        return result
 
-    for block_name, row_rules in rules.items():
-        if block_name not in config.TEMPLATE_BLOCKS.get(template_name, []):
+    wb = openpyxl.load_workbook(debts_path, data_only=True)
+    ws = wb.active
+
+    print(f"[_parse_debts] лист: {ws.title}, "
+          f"строк: {ws.max_row}, колонок: {ws.max_column}")
+
+    header_row = None
+    for r in range(1, min(30, ws.max_row + 1)):
+        v = ws.cell(row=r, column=1).value
+        if not v:
             continue
-
-        block_start = _find_block_start(ws, block_name)
-        if block_start == 0:
-            if config.DEBUG:
-                print(f"[extra-cons] блок не найден в шаблоне: {block_name}")
+        sv = str(v).strip().lower()
+        if sv != "объект":
             continue
-
-        end_row = _find_block_end(ws, block_start)
-
-        for row_title, source_blocks in row_rules.items():
-            # Нормализованное название без номера — используется
-            # и для поиска целевой строки, и для поиска источников.
-            # В шаблоне строка называется просто «Прочие расходы»,
-            # в подблоках — «3. Прочие расходы»; после _strip_prefix
-            # оба названия дают «Прочие расходы».
-            row_title_norm = _norm_for_compare(_strip_prefix(row_title))
-
-            if config.DEBUG:
-                print(f"[extra-cons] ищу row_title={row_title!r}, "
-                      f"norm={row_title_norm!r}")
-
-            # 1) Ищем целевую строку в блоке.
-            target_row = None
-            for r in range(block_start + 1, end_row + 1):
-                title = ws.cell(row=r, column=2).value
-                if title is None:
-                    continue
-                if config.DEBUG:
-                    print(f"[extra-cons]   стр.{r}: {title!r} "
-                          f"→ {_norm_for_compare(_strip_prefix(title))!r}")
-                if _norm_for_compare(_strip_prefix(title)) == row_title_norm:
-                    target_row = r
-                    break
-            if target_row is None:
-                if config.DEBUG:
-                    print(f"[extra-cons] {block_name}: строка '{row_title}' не найдена")
-                continue
-
-            # 2) Ищем ту же строку в каждом подблоке.
-            source_rows = []
-            for sb in source_blocks:
-                sb_start = _find_block_start(ws, sb)
-                if sb_start == 0:
-                    if config.DEBUG:
-                        print(f"[extra-cons] подблок не найден: {sb}")
-                    continue
-                sb_end = _find_block_end(ws, sb_start)
-
-                for r in range(sb_start + 1, sb_end + 1):
-                    title = ws.cell(row=r, column=2).value
-                    if title is None:
-                        continue
-                    t_norm = _norm_for_compare(_strip_prefix(title))
-                    if t_norm == row_title_norm:
-                        source_rows.append((sb, r))
-                        break
-
-            if not source_rows:
-                if config.DEBUG:
-                    print(f"[extra-cons] {block_name}: строка '{row_title}' — "
-                          f"нет ни одного источника")
-                continue
-
-            # 3) Складываем значения по колонкам.
-            totals = {}
-            for col_idx in (3, 5, 6, 8, 10):
-                total = 0.0
-                for sb, sr in source_rows:
-                    v = ws.cell(row=sr, column=col_idx).value
-                    if isinstance(v, (int, float)):
-                        total += float(v)
-                        continue
-                    if isinstance(v, str) and v.startswith("="):
-                        # 1) Разворачиваем =SUM(X:Y) вручную
-                        val = _extract_sum_from_formula(v, ws)
-                        if val is not None:
-                            total += val
-                            continue
-                        # 2) Fallback — закешированное значение
-                        if ws_values is not None:
-                            v_cached = ws_values.cell(row=sr, column=col_idx).value
-                            if isinstance(v_cached, (int, float)):
-                                total += float(v_cached)
-                                continue
-                    # Если формула не =SUM(...) и кеша нет — вклад 0.
-                totals[col_idx] = total
-
-            for col_idx, total in totals.items():
-                _safe_set_value(ws, target_row, col_idx, total)
-
-            if config.DEBUG:
-                src_rows = [r for _, r in source_rows]
-                print(f"[extra-cons] {block_name}: '{row_title}' "
-                      f"(стр.{target_row}) = "
-                      f"C={totals[3]}, E={totals[5]}, F={totals[6]}, "
-                      f"H={totals[8]}, J={totals[10]} "
-                      f"из строк {src_rows}")
-
-
-# ============================================================
-# ПРОВЕРКА ФОРМУЛ
-# ============================================================
-
-_BROKEN_FORMULA_TOKENS = (
-    "#REF!", "#ДЕЛ/0!", "#ЗНАЧ!", "#ИМЯ?", "#ЧИСЛО!", "#ПУСТО!", "#Н/Д",
-)
-
-
-def _verify_formulas(ws, template_name):
-    if not config.VERIFY_FORMULAS:
-        return
-    bad = 0
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
-            v = cell.value
-            if not isinstance(v, str):
-                continue
-            for token in _BROKEN_FORMULA_TOKENS:
-                if token in v:
-                    print(f"[WARN] {template_name}: битая формула в {cell.coordinate}: {v!r}")
-                    bad += 1
-                    break
-    if config.DEBUG and bad == 0:
-        print(f"[verify] {template_name}: битых формул не найдено")
-
-# ============================================================
-# ВЫЧИСЛЕНИЕ АГРЕГАТНЫХ ФОРМУЛ
-# ============================================================
-# После записи значений в блок нужно вычислить формулы-агрегаты
-# (=SUM(...), =A1+B1, =A1-B1 и т.п.), потому что openpyxl не
-# пересчитывает формулы, а Excel пересчитает только при открытии.
-# Без этого зависимые формулы (=IFERROR(C8/$C$6,0)) дадут
-# #ДЕЛ/0! или 0.
-
-_SIMPLE_ARITH_RE = re.compile(
-    r"^=\s*\$?([A-Z]+)\$?(\d+)\s*([+\-*/])\s*\$?([A-Z]+)\$?(\d+)\s*$"
-)
-
-_CELL_REF_RE = re.compile(r"\$?([A-Z]+)\$?(\d+)")
-
-
-def _col_letter_to_idx(letter):
-    idx = 0
-    for ch in letter.upper():
-        idx = idx * 26 + (ord(ch) - ord('A') + 1)
-    return idx
-
-
-def _read_cell_value(ws, ref):
-    """Читает значение ячейки по ссылке вида C6 или $C$6.
-    Если в ячейке формула-агрегат — разворачиваем её рекурсивно.
-    """
-    m = _CELL_REF_RE.fullmatch(ref.strip())
-    if not m:
-        return None
-    col = _col_letter_to_idx(m.group(1))
-    row = int(m.group(2))
-    v = ws.cell(row=row, column=col).value
-    if isinstance(v, (int, float)):
-        return float(v)
-    if isinstance(v, str):
-        if v.startswith("="):
-            # >>> ДОБАВЛЕНО: ячейка содержит формулу — разворачиваем.
-            # Это нужно, чтобы ROI УК (=E645/E649) посчитался,
-            # даже если E645 — это формула =E599-E604.
-            return _eval_formula(ws, v)
-        s = v.strip().replace(",", ".")
-        try:
-            return float(s)
-        except ValueError:
-            return None
-    return None
-
-
-def _eval_formula(ws, formula, depth=0):
-    """
-    Рекурсивно вычисляет простые формулы:
-      - =SUM(X1:X2)
-      - =A1+B1, =A1-B1, =A1*B1, =A1/B1
-      - =IFERROR(expr, fallback)
-    Возвращает число или None, если не удалось.
-    """
-    if depth > 20:
-        return None
-    if not isinstance(formula, str) or not formula.startswith("="):
-        return None
-
-    f = formula.strip()
-
-    # >>> ДОБАВЛЕНО: простая ссылка =C604 (без арифметики).
-    # Без этого _force_numeric_denominator не может развернуть
-    # строку «Расходы» в консолидированном блоке, где формула
-    # вида =C604+C607+C608+C609+C618+C619+C620, а C604 —
-    # это формула =C605+C606.
-    m_ref = _SIMPLE_REF_RE.match(f)
-    if m_ref:
-        ref = f[1:].strip()
-        return _read_cell_value(ws, ref)
-
-    # IFERROR(expr, fallback)
-    m = re.match(r"^=IFERROR\s*\((.*)\)\s*$", f, re.IGNORECASE)
-    if m:
-        inner = m.group(1)
-        # Разбиваем по запятой верхнего уровня
-        depth_p = 0
-        parts = []
-        cur = ""
-        for ch in inner:
-            if ch == "(":
-                depth_p += 1
-            elif ch == ")":
-                depth_p -= 1
-            if ch == "," and depth_p == 0:
-                parts.append(cur)
-                cur = ""
-            else:
-                cur += ch
-        parts.append(cur)
-        if len(parts) >= 2:
-            val = _eval_formula(ws, "=" + parts[0].strip(), depth + 1)
-            if val is None or val == 0:
-                fb = parts[1].strip()
-                try:
-                    return float(fb)
-                except ValueError:
-                    return _eval_formula(ws, "=" + fb, depth + 1)
-            return val
-        return None
-
-    # SUM(X1:X2)
-    m = re.match(r"^=SUM\s*\(\s*\$?([A-Z]+)\$?(\d+)\s*:\s*\$?([A-Z]+)\$?(\d+)\s*\)\s*$",
-                 f, re.IGNORECASE)
-    if m:
-        c1 = _col_letter_to_idx(m.group(1))
-        r1 = int(m.group(2))
-        c2 = _col_letter_to_idx(m.group(3))
-        r2 = int(m.group(4))
-        total = 0.0
-        for rr in range(r1, r2 + 1):
-            for cc in range(c1, c2 + 1):
-                v = ws.cell(row=rr, column=cc).value
-                if isinstance(v, (int, float)):
-                    total += float(v)
-                elif isinstance(v, str) and v.startswith("="):
-                    sub = _eval_formula(ws, v, depth + 1)
-                    if sub is not None:
-                        total += sub
-        return total
-
-    # SUM(A1,B1,C1,...)
-    m = re.match(r"^=SUM\s*\((.*)\)\s*$", f, re.IGNORECASE)
-    if m:
-        inner = m.group(1)
-        total = 0.0
-        for part in inner.split(","):
-            part = part.strip()
-            if ":" in part:
-                sub_m = re.match(r"\$?([A-Z]+)\$?(\d+)\s*:\s*\$?([A-Z]+)\$?(\d+)", part)
-                if sub_m:
-                    c1 = _col_letter_to_idx(sub_m.group(1))
-                    r1 = int(sub_m.group(2))
-                    c2 = _col_letter_to_idx(sub_m.group(3))
-                    r2 = int(sub_m.group(4))
-                    for rr in range(r1, r2 + 1):
-                        for cc in range(c1, c2 + 1):
-                            v = ws.cell(row=rr, column=cc).value
-                            if isinstance(v, (int, float)):
-                                total += float(v)
-                continue
-            v = _read_cell_value(ws, part)
-            if v is not None:
-                total += v
-        return total
-
-    # Простая арифметика A1+B1, A1-B1, A1*B1, A1/B1
-    m = _SIMPLE_ARITH_RE.match(f)
-    if m:
-        v1 = _read_cell_value(ws, m.group(1) + m.group(2))
-        v2 = _read_cell_value(ws, m.group(4) + m.group(5))
-        if v1 is None or v2 is None:
-            return None
-        op = m.group(3)
-        if op == "+":
-            return v1 + v2
-        if op == "-":
-            return v1 - v2
-        if op == "*":
-            return v1 * v2
-        if op == "/":
-            return v1 / v2 if v2 != 0 else None
-
-    # >>> ДОБАВЛЕНО: ссылка и число: =C647*12, =C647/12, =C647+12, =C647-12.
-    # Также число и ссылка: =12*C647, =12-C647 и т.п.
-    m2 = re.match(
-        r"^=\s*(\$?[A-Z]+\$?\d+|\d+(?:\.\d+)?)"
-        r"\s*([+\-*/])\s*"
-        r"(\$?[A-Z]+\$?\d+|\d+(?:\.\d+)?)\s*$",
-        f,
-    )
-    if m2:
-        def _resolve(tok):
-            tok = tok.strip()
-            # число?
-            try:
-                return float(tok)
-            except ValueError:
-                pass
-            # ссылка?
-            val = _read_cell_value(ws, tok)
-            if val is not None:
-                return val
-            # в ячейке формула? — раскрываем рекурсивно
-            m_ref = _CELL_REF_RE.fullmatch(tok)
-            if m_ref:
-                col = _col_letter_to_idx(m_ref.group(1))
-                row = int(m_ref.group(2))
-                inner = ws.cell(row=row, column=col).value
-                if isinstance(inner, str) and inner.startswith("="):
-                    return _eval_formula(ws, inner, depth + 1)
-            return None
-
-        v1 = _resolve(m2.group(1))
-        v2 = _resolve(m2.group(3))
-        if v1 is None or v2 is None:
-            return None
-        op = m2.group(2)
-        if op == "+":
-            return v1 + v2
-        if op == "-":
-            return v1 - v2
-        if op == "*":
-            return v1 * v2
-        if op == "/":
-            return v1 / v2 if v2 != 0 else None
-
-    # Цепочка A1+B1+C1+... или SUM(X:Y)-C23
-    # Пробуем вычислить как сумму/разность слагаемых.
-    if re.match(r"^=", f):
-        # Разбиваем по + и - на верхнем уровне (не внутри скобок).
-        depth_p = 0
-        parts = []
-        cur = ""
-        cur_sign = "+"
-        for ch in f[1:]:
-            if ch == "(":
-                depth_p += 1
-            elif ch == ")":
-                depth_p -= 1
-            if ch in "+-" and depth_p == 0:
-                parts.append((cur_sign, cur.strip()))
-                cur_sign = ch
-                cur = ""
-            else:
-                cur += ch
-        parts.append((cur_sign, cur.strip()))
-
-        if len(parts) >= 2:
-            total = 0.0
-            ok = True
-            for sign, part in parts:
-                if not part:
-                    continue
-                # Пытаемся вычислить часть как формулу (SUM, IFERROR, ссылка).
-                val = None
-                if part.startswith("SUM") or part.startswith("IFERROR"):
-                    val = _eval_formula(ws, "=" + part, depth + 1)
-                else:
-                    # Простая ссылка или число.
-                    try:
-                        val = float(part)
-                    except ValueError:
-                        val = _read_cell_value(ws, part)
-                        if val is None:
-                            val = _eval_formula(ws, "=" + part, depth + 1)
-                if val is None:
-                    ok = False
-                    break
-                if sign == "-":
-                    total -= val
-                else:
-                    total += val
-            if ok:
-                return total
-
-    return None
-
-def _fix_prochie_raskhody(ws, block_start, block_end):
-    """
-    Пересчитывает строку «Прочие расходы» как сумму строк 3.x
-    (после «Прочие расходы» и до «Валовая Прибыль»).
-    """
-    pr_row = None
-    for r in range(block_start + 1, block_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
-            continue
-        t_norm = _norm_for_compare(_strip_prefix(title))
-        if t_norm == _norm_for_compare("Прочие расходы"):
-            pr_row = r
+        has_dates = any(
+            isinstance(ws.cell(row=r, column=c).value,
+                       (_dt.datetime, _dt.date))
+            for c in range(2, min(ws.max_column, 25) + 1)
+        )
+        if has_dates:
+            header_row = r
             break
-    if pr_row is None:
-        return
 
-    end_pr = pr_row
-    for r in range(pr_row + 1, block_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
+    if header_row is None:
+        print("[_parse_debts] не найдена шапка «Объект» с датами")
+        for rr in range(1, min(6, ws.max_row + 1)):
+            print(f"[_parse_debts]   A{rr} = "
+                  f"{ws.cell(row=rr, column=1).value!r}")
+        return result
+    print(f"[_parse_debts] шапка «Объект» с датами — строка {header_row}")
+
+    month_col = {}
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=header_row, column=c).value
+        if isinstance(v, (_dt.datetime, _dt.date)):
+            if v.year == config.REPORT_YEAR and v.month in months:
+                month_col[v.month] = c
             continue
-        t_norm = _norm_for_compare(_strip_prefix(title))
-        if t_norm in {"валоваяприбыль", "рентабельность"}:
-            break
-        end_pr = r
-
-    # Если после «Прочие расходы» нет ни одной подстроки 3.x —
-    # НЕ трогаем ячейку (в консолидированном блоке она заполняется
-    # из подблоков через _postprocess_extra_consolidation).
-    if end_pr <= pr_row:
-        if config.DEBUG:
-            print(f"[fix PR] блок {block_start}: после «Прочие расходы» "
-                  f"(стр.{pr_row}) нет подстрок — пропускаю.")
-        return
-
-    for col_idx in (3, 5, 6, 8, 10):
-        total = 0.0
-        for r in range(pr_row + 1, end_pr + 1):
-            v = ws.cell(row=r, column=col_idx).value
-            if isinstance(v, (int, float)):
-                total += float(v)
-        _safe_set_value(ws, pr_row, col_idx, total)
-    if config.DEBUG:
-        print(f"[fix PR] блок {block_start}: «Прочие расходы» = строка {pr_row}, "
-              f"сумма строк {pr_row + 1}..{end_pr}")
-
-def _force_numeric_denominator(ws, block_start, block_end):
-    """
-    Принудительно вычисляет строку «Расходы» (знаменатель долей)
-    в столбцах C, E, F, H, J. Если формула не вычисляется —
-    оставляет как есть, но пишет предупреждение в DEBUG.
-    """
-    denom_row = None
-    for r in range(block_start + 1, block_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
-            continue
-        t_norm = _norm_for_compare(_strip_prefix(title))
-        if t_norm == _norm_for_compare(config.SHARE_DENOMINATOR_TITLE):
-            denom_row = r
-            break
-    if denom_row is None:
-        return
-
-    for col_idx in (3, 5, 6, 8, 10):
-        cell = ws.cell(row=denom_row, column=col_idx)
-        if type(cell).__name__ == "MergedCell":
-            continue
-        v = cell.value
-        if not (isinstance(v, str) and v.startswith("=")):
-            continue
-        # Пытаемся вычислить формулу.
-        val = _eval_formula(ws, v)
-        if val is not None:
-            _safe_set_value(ws, denom_row, col_idx, val)
-            if config.DEBUG:
-                print(f"[force denom] строка {denom_row}, колонка {col_idx}: "
-                      f"{v!r} → {val}")
-        elif config.DEBUG:
-            print(f"[force denom] НЕ удалось вычислить {cell.coordinate}: {v!r}")
-
-def _fix_share_formulas(ws, block_start, block_end):
-    """
-    Заполняет столбцы D и I долями расходов.
-
-    Логика:
-      - доля считается ТОЛЬКО для строк секции «расход»
-        (строки 2.x и 3.x), включая саму строку «3. Прочие расходы»,
-        но ИСКЛЮЧАЯ заголовок «2. Расходы»;
-      - знаменатель — строка «Расходы» блока
-        (config.SHARE_DENOMINATOR_TITLE);
-      - доля ВСЕГДА записывается ЧИСЛОМ. Если числитель или
-        знаменатель — формула, она сначала вычисляется через
-        _eval_formula. Если вычислить не удалось — пишем 0.
-    """
-    # --- 1. Находим строку «Расходы» (знаменатель) ---
-    denom_row = None
-    for r in range(block_start + 1, block_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
-            continue
-        t_norm = _norm_for_compare(_strip_prefix(title))
-        if t_norm == _norm_for_compare(config.SHARE_DENOMINATOR_TITLE):
-            denom_row = r
-            break
-    if denom_row is None:
-        return
-
-    # --- 2. Определяем границы секций в блоке ---
-    sections = []
-    for r in range(block_start + 1, block_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
-            continue
-        sec = _detect_section(title)
-        if sec is not None:
-            sections.append((r, sec))
-
-    def _section_of(row):
-        cur = None
-        for sr, name in sections:
-            if sr <= row:
-                cur = name
-            else:
+        sv = str(v).strip().lower()
+        for m in months:
+            if m in month_col:
+                continue
+            month_name = _MONTHS_RU_LOWER[m]
+            if month_name in sv and str(config.REPORT_YEAR) in sv:
+                month_col[m] = c
                 break
-        return cur
+    print(f"[_parse_debts] колонок с датами в шапке (год "
+          f"{config.REPORT_YEAR}): {len(month_col)}")
+    print(f"[_parse_debts]   month_col = {month_col}")
 
-    # --- 3. Строки, для которых доли НЕ считаем ---
-    skip_norm = {
-        "валоваяприбыль", "рентабельность",
-        "roiнавложенныесредства,вмесяц",
-        "планируемыйroiнагод",
-        "вложенныесредстванаобъекты",
-        "расходы",     # знаменатель
-        "выручка",     # заголовок секции доход
+    if not month_col:
+        print("[_parse_debts] в шапке нет дат нужных месяцев")
+        return result
+
+    headcount_header_row = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        name = _clean(ws.cell(row=r, column=1).value)
+        if not name:
+            continue
+        if "численность" in name.lower():
+            headcount_header_row = r
+            break
+
+        vals = {}
+        for m, col in month_col.items():
+            vals[m] = _num(ws, r, col)
+        result["debts"][name] = vals
+
+    print(f"[_parse_debts] объектов с долгами: {len(result['debts'])}")
+    for k in result["debts"]:
+        print(f"[_parse_debts]   • {k}")
+
+    if headcount_header_row is not None:
+        print(f"[_parse_debts] блок «Численность» — строка {headcount_header_row}")
+
+        hc_dates_row = None
+        hc_values_row = None
+
+        for rr in range(headcount_header_row + 1,
+                        min(headcount_header_row + 10, ws.max_row + 1)):
+            a_val = ws.cell(row=rr, column=1).value
+            has_dates = any(
+                isinstance(ws.cell(row=rr, column=c).value, (_dt.datetime, _dt.date))
+                for c in range(2, min(ws.max_column, 25) + 1)
+            )
+            has_numbers = any(
+                isinstance(ws.cell(row=rr, column=c).value, (int, float))
+                and not isinstance(ws.cell(row=rr, column=c).value, bool)
+                for c in range(2, min(ws.max_column, 25) + 1)
+            )
+
+            if has_dates and hc_dates_row is None:
+                hc_dates_row = rr
+            elif has_numbers and hc_dates_row is not None and hc_values_row is None:
+                hc_values_row = rr
+
+        print(f"[_parse_debts]   строка с датами: {hc_dates_row}")
+        print(f"[_parse_debts]   строка с числами: {hc_values_row}")
+
+        if hc_values_row is not None:
+            hc_month_col = {}
+            if hc_dates_row is not None:
+                for c in range(2, ws.max_column + 1):
+                    v = ws.cell(row=hc_dates_row, column=c).value
+                    if isinstance(v, (_dt.datetime, _dt.date)):
+                        if v.year == config.REPORT_YEAR and v.month in months:
+                            hc_month_col[v.month] = c
+                        continue
+                    sv = str(v).strip().lower()
+                    for m in months:
+                        if m in hc_month_col:
+                            continue
+                        month_name = _MONTHS_RU_LOWER[m]
+                        if month_name in sv and str(config.REPORT_YEAR) in sv:
+                            hc_month_col[m] = c
+                            break
+            if not hc_month_col:
+                hc_month_col = month_col
+
+            for m, col in hc_month_col.items():
+                result["headcount"][m] = _num(ws, hc_values_row, col)
+
+            print(f"[_parse_debts] численность: {result['headcount']}")
+        else:
+            print("[_parse_debts] не найдена строка с числами в блоке «Численность»")
+    else:
+        print("[_parse_debts] блок «Численность» не найден")
+
+    return result
+
+
+def _sheet_debts_bars(wb, sheet_title, chart_title, subtitle,
+                      objects, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [o["name"] for o in objects]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for o in objects:
+            row.append(round(o["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(objects),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, o in enumerate(objects):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.solidFill = o["color"]
+            chart.series[idx].graphicalProperties.line.solidFill = o["color"]
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_debts_lines(wb, sheet_title, chart_title, subtitle,
+                       objects, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [o["name"] for o in objects]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for o in objects:
+            row.append(round(o["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(objects),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, o in enumerate(objects):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = o["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_headcount_analysis(wb, sheet_title, chart_title, subtitle,
+                              headcount, total_revenue, total_fot, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Численность",
+               "Выручка на 1 сотрудника",
+               "Средняя ЗП на 1 сотрудника"]
+    rows_data = []
+    for m in months:
+        hc = headcount.get(m, 0.0) or 0.0
+        rev = total_revenue.get(m, 0.0) or 0.0
+        fot = total_fot.get(m, 0.0) or 0.0
+        rev_per = (rev / hc) if hc else 0.0
+        fot_per = (abs(fot) / hc) if hc else 0.0
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(hc, 2),
+            round(rev_per, 2),
+            round(fot_per, 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=4,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    colors = ["4472C4", "C00000", "70AD47"]
+    for idx, c in enumerate(colors):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = c
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_roi(wb, sheet_title, chart_title, subtitle,
+               series_data, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.00%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.00%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.00%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+# ============================================================
+# НОВЫЙ РАСЧЁТ ТБУ С РАЗДЕЛЕНИЕМ РАСХОДОВ
+# ============================================================
+
+def _collect_breakeven(rows, months, fixed_override=None):
+    """
+    Возвращает {unit_name: {month: value}} — точку безубыточности (ТБУ).
+
+    Методика «Нескучных финансов»:
+      ТБУ = Постоянные / (1 - Переменные / Выручка)
+      Если переменных нет — ТБУ = Постоянные.
+
+    Структура ОПиУ:
+      Производственные расходы (level 0)
+        · Прямые производственные (level 1)
+          ·· Latvia (level 2)          ← юнит
+            ··· AN14 (level 3)         ← объект — АГРЕГАТ
+              ···· <статьи> (level 4)
+      Косвенные расходы (level 0)
+        · Административные расходы (level 1)
+          ·· Latvia (level 2)          ← юнит
+            ··· SK3 (level 3)
+      Коммерческие расходы (level 0)
+        ·· Nomiqa (level 2)            ← юнит
+          ··· BNQ_BAKU (level 3)
+    """
+    _SECTIONS = (
+        "Производственные расходы",
+        "Косвенные расходы",
+        "Коммерческие расходы",
+    )
+
+    # Множества нормализованных названий статей
+    var_keys_norm = {
+        _norm_key(k) for k in config.VARIABLE_EXPENSE_KEYS
+    }
+    fix_keys_norm = {
+        _norm_key(k) for k in config.FIXED_EXPENSE_KEYS
     }
 
-    # --- 4. Заполняем доли ---
-    for r in range(block_start + 1, block_end + 1):
-        if r == denom_row:
+    revenue = {u: {m: 0.0 for m in months} for u in _UNITS}
+    variable = {u: {m: 0.0 for m in months} for u in _UNITS}
+    fixed = {u: {m: 0.0 for m in months} for u in _UNITS}
+
+    cur_section = None
+    cur_unit = None
+    cur_unit_level = None
+
+    # Стек уровней, чтобы понимать, куда относить статьи.
+    for r, lvl, title, values in rows:
+        # level 0 — смена секции
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            cur_unit_level = None
             continue
 
-        title = ws.cell(row=r, column=2).value
-        if title is None:
+        # level 1 — юнит или не-юнит
+        if lvl == 1:
+            if title in _UNITS and cur_section in _SECTIONS:
+                cur_unit = title
+                cur_unit_level = 1
+            else:
+                cur_unit = None
+                cur_unit_level = None
             continue
 
-        t_norm = _norm_for_compare(_strip_prefix(title))
-        if t_norm in skip_norm:
+        # юнит ниже level 1 (например, Latvia внутри
+        # «Прямые производственные» — на level 2)
+        if title in _UNITS:
+            if cur_section in _SECTIONS or cur_section == "Выручка":
+                cur_unit = title
+                cur_unit_level = lvl
             continue
 
-        if _section_of(r) != "расход":
+        if cur_unit is None:
             continue
 
-        # Пары (числитель, доля):
-        #   C(3) → D(4)   — доля по факту прошлого месяца
-        #   F(6) → G(7)   — доля по плану текущего месяца
-        #   H(8) → I(9)   — доля по факту текущего месяца
-        #   J(10) → K(11) — доля по прогнозу будущего месяца
-        for src_col, tgt_col in ((3, 4), (6, 7), (8, 9), (10, 11)):
-            num_val = ws.cell(row=r, column=src_col).value
-            denom_val = ws.cell(row=denom_row, column=src_col).value
+        # вышли за пределы юнита
+        if lvl <= cur_unit_level:
+            cur_unit = None
+            cur_unit_level = None
+            continue
 
-            # Если числитель — формула, вычисляем его.
-            if isinstance(num_val, str) and num_val.startswith("="):
-                num_val = _eval_formula(ws, num_val)
-            # Если знаменатель — формула, вычисляем его.
-            if isinstance(denom_val, str) and denom_val.startswith("="):
-                denom_val = _eval_formula(ws, denom_val)
+        u = cur_unit
 
-            try:
-                num = float(num_val) if num_val is not None else 0.0
-                denom = float(denom_val) if denom_val is not None else 0.0
-            except (ValueError, TypeError):
-                num, denom = 0.0, 0.0
+        # выручка юнита
+        if cur_section == "Выручка":
+            if lvl == cur_unit_level + 1:
+                for m in months:
+                    revenue[u][m] += values.get(m, 0.0) or 0.0
+            continue
 
-            share = (num / denom) if denom != 0 else 0.0
+        # расходы: только прямые дети юнита
+        if cur_section in _SECTIONS:
+            if lvl == cur_unit_level + 1:
+                title_norm = _norm_key(title)
+                for m in months:
+                    v = abs(values.get(m, 0.0) or 0.0)
 
-            _safe_set_value(ws, r, tgt_col, share)
+                    # Классификация статьи:
+                    #   - переменная (в var_keys_norm)
+                    #   - постоянная (в fix_keys_norm)
+                    #   - по умолчанию — постоянная
+                    if title_norm in var_keys_norm:
+                        variable[u][m] += v
+                    elif title_norm in fix_keys_norm:
+                        fixed[u][m] += v
+                    else:
+                        fixed[u][m] += v
 
-            # Формат "0.00%" — Excel сам умножит значение (0..1) на 100
-            # и покажет "38.37%". Внутри ячейки остаётся доля 0.3837.
-            tgt_cell = ws.cell(row=r, column=tgt_col)
-            if type(tgt_cell).__name__ != "MergedCell":
-                try:
-                    tgt_cell.number_format = '0.00%'
-                except Exception:
-                    pass
+                    if config.DEBUG and m == 1:
+                        print(f"[ТБУ-СТАТЬЯ] юнит={u}, "
+                              f"секция={cur_section}, lvl={lvl}, "
+                              f"title={title!r}, "
+                              f"norm={title_norm!r}, "
+                              f"var={title_norm in var_keys_norm}, "
+                              f"fix={title_norm in fix_keys_norm}, "
+                              f"value={v:.2f}")
+            continue
+
+    # --- финальный расчёт ТБУ ---
+    result = {u: {m: 0.0 for m in months} for u in _UNITS}
+    for u in _UNITS:
+        for m in months:
+            rev = revenue[u].get(m, 0.0) or 0.0
+            var = variable[u].get(m, 0.0) or 0.0
+            fix = fixed[u].get(m, 0.0) or 0.0
+
+            if rev <= 0:
+                # Нет выручки — ТБУ не определена
+                result[u][m] = 0.0
+                continue
+
+            # КМД = (Выручка − Переменные) / Выручка
+            kmd = (rev - var) / rev
+
+            if kmd <= 0:
+                # Переменные съедают всю выручку — ТБУ не определена
+                result[u][m] = 0.0
+            else:
+                result[u][m] = fix / kmd
 
     if config.DEBUG:
-        print(f"[fix share] блок {block_start}: знаменатель «Расходы» в строке "
-              f"{denom_row}, доли записаны в D и I (числами)")
+        for u in _UNITS:
+            for m in months:
+                print(f"[ТБУ] {u} м.{m}: "
+                      f"выручка={revenue[u][m]:.2f}, "
+                      f"перем={variable[u][m]:.2f}, "
+                      f"пост={fixed[u][m]:.2f}, "
+                      f"ТБУ={result[u][m]:.2f}")
 
-def _recalc_aggregates(ws, block_start, block_end):
+    return result
+
+
+def _norm_key(s):
     """
-    Проходит по строкам блока и вычисляет все формулы-агрегаты
-    (=SUM, =A1+B1, =A1-B1 и т.п.), заменяя их на значения.
-    Делает несколько проходов, пока что-то меняется
-    (для вложенных агрегатов).
-
-    ВАЖНО: этот метод вычисляет ТОЛЬКО агрегаты. Простые ссылки
-    вида =C4 обрабатывает отдельная функция _resolve_simple_refs,
-    которую нужно вызывать СРАЗУ ПОСЛЕ этой.
+    Нормализация названия статьи для сопоставления с ключами
+    config.VARIABLE_EXPENSE_KEYS / config.FIXED_EXPENSE_KEYS.
+    Убирает пробелы, дефисы, точки, приводит к нижнему регистру.
     """
-    # Столбцы D (4) и I (9) — это формулы долей, которые
-    # Excel пересчитает сам. Мы их НЕ трогаем.
-    SKIP_COLS = {4, 9}
-
-    for _ in range(10):  # максимум 10 проходов
-        changed = False
-        for r in range(block_start, block_end + 1):
-            for c in range(3, ws.max_column + 1):
-                if c in SKIP_COLS:
-                    continue
-                cell = ws.cell(row=r, column=c)
-                # Пропускаем MergedCell — их .value read-only.
-                if type(cell).__name__ == "MergedCell":
-                    continue
-                v = cell.value
-                if not (isinstance(v, str) and v.startswith("=")):
-                    continue
-                if not _is_aggregate_formula(cell):
-                    continue
-                # Пытаемся вычислить
-                val = _eval_formula(ws, v)
-                if val is not None:
-                    _safe_set_value(ws, r, c, val)
-                    changed = True
-        if not changed:
-            break
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    s = s.replace("\u00a0", " ")
+    s = re.sub(r"[\s\-–—.,]+", "", s)
+    return s
 
 
 # ============================================================
-# ВЫЧИСЛЕНИЕ ПРОСТЫХ ССЫЛОК =C4
+# ШАГ 3. СБОРКА ДАННЫХ
 # ============================================================
-# В шаблоне Unelma есть формулы-ссылки =C4, =E4, =F4, =H4, =J4
-# в строке «1. Выручка», которые ссылаются на строку 4
-# («Выручка строительных проектов»). Программа записывает
-# данные в строку 3 («1. Выручка»), а не в строку 4, поэтому
-# ссылка =C4 даёт 0.
-#
-# Эта функция принудительно заменяет простые ссылки на значения.
-# Вызывать ПОСЛЕ _recalc_aggregates.
 
-def _resolve_simple_refs(ws, block_start, block_end):
-    """
-    Заменяет формулы-ссылки вида =C4, =$C$4 на их значения.
-    Для агрегатов (SUM, A1+B1 и т.п.) ничего не делает.
-    """
-    for r in range(block_start, block_end + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
-            if type(cell).__name__ == "MergedCell":
+def _collect_units(rows, months):
+    units = {u: {
+        "revenue": {m: 0.0 for m in months},
+        "net":     {m: 0.0 for m in months},
+        "fot":     {m: 0.0 for m in months},
+        "objects": {},
+    } for u in _UNITS}
+
+    cur_section = None
+    cur_unit = None
+    for r, lvl, title, values in rows:
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            continue
+        if lvl == 1:
+            cur_unit = title
+            continue
+        if (lvl == 2
+                and cur_section in (_SECTION_REVENUE, _SECTION_NET)
+                and cur_unit in _UNITS):
+            if title not in units[cur_unit]["objects"]:
+                units[cur_unit]["objects"][title] = {
+                    "revenue": {m: 0.0 for m in months},
+                    "net":     {m: 0.0 for m in months},
+                    "fot":     {m: 0.0 for m in months},
+                }
+
+    for u_name, u in units.items():
+        for obj_name in list(u["objects"].keys()):
+            rev = _find_row(rows, _SECTION_REVENUE, u_name, object_name=obj_name)
+            net = _find_row(rows, _SECTION_NET, u_name, object_name=obj_name)
+            for m in months:
+                u["objects"][obj_name]["revenue"][m] = rev.get(m, 0.0)
+                u["objects"][obj_name]["net"][m]     = net.get(m, 0.0)
+
+    for u_name, u in units.items():
+        for obj_name in list(u["objects"].keys()):
+            fot_prod = _find_object_fot(rows, _SECTION_PROD, u_name, obj_name)
+            fot_comm = _find_object_fot(rows, _SECTION_COMM, u_name, obj_name)
+            for m in months:
+                u["objects"][obj_name]["fot"][m] = (
+                    fot_prod.get(m, 0.0) + fot_comm.get(m, 0.0)
+                )
+
+    for u_name, u in units.items():
+        for m in months:
+            u["net"][m]     = sum(o["net"][m]     for o in u["objects"].values())
+            u["revenue"][m] = sum(o["revenue"][m] for o in u["objects"].values())
+            u["fot"][m]     = sum(o["fot"][m]     for o in u["objects"].values())
+
+    if "Latvia" in units:
+        lat = units["Latvia"]
+        commercial = {
+            "revenue": {m: 0.0 for m in months},
+            "net":     {m: 0.0 for m in months},
+            "fot":     {m: 0.0 for m in months},
+        }
+        for obj_name in _LATVIA_COMMERCIAL:
+            obj = lat["objects"].get(obj_name)
+            if not obj:
                 continue
-            v = cell.value
-            if not (isinstance(v, str) and v.startswith("=")):
-                continue
-            # НЕ трогаем агрегаты
-            if _is_aggregate_formula(cell):
-                continue
-            # Проверяем, что это простая ссылка =C4 или =$C$4
-            m = _SIMPLE_REF_RE.match(v.strip())
-            if not m:
-                continue
-            ref = v.strip()[1:].strip()   # "C4" или "$C$4"
-            val = _read_cell_value(ws, ref)
-            if val is not None:
-                _safe_set_value(ws, r, c, val)
-                if config.DEBUG:
-                    print(f"[resolve ref] {cell.coordinate}: {v!r} → {val}")
+            for m in months:
+                commercial["revenue"][m] += obj["revenue"][m]
+                commercial["net"][m]     += obj["net"][m]
+                commercial["fot"][m]     += obj["fot"][m]
+        lat["objects"]["Коммерческие помещения LV"] = commercial
+
+    return units
+
+
+# ============================================================
+# ПОСТРОЕНИЕ ЛИСТОВ
+# ============================================================
+
+def _write_header(ws, title, subtitle=""):
+    ws.cell(row=1, column=1, value=title).font = _TITLE_FONT
+    if subtitle:
+        ws.cell(row=2, column=1, value=subtitle).font = _SUBTITLE_FONT
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=13)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=13)
+
+
+def _write_month_table(ws, start_row, headers, rows_data, number_fmt='#,##0'):
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=start_row, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+    for r_off, row_vals in enumerate(rows_data, start=1):
+        for c, v in enumerate(row_vals, start=1):
+            cell = ws.cell(row=start_row + r_off, column=c, value=v)
+            cell.border = _CELL_BORDER
+            if isinstance(v, (int, float)) and c > 1:
+                cell.number_format = number_fmt
+
+
+def _sheet_revenue_profit(wb, sheet_title, chart_title, subtitle,
+                          color_rev, color_net,
+                          data, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Выручка", "Чистая прибыль"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data["revenue"][m], 2),
+            round(data["net"][m], 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    chart.series[0].graphicalProperties.solidFill = color_rev
+    chart.series[0].graphicalProperties.line.solidFill = color_rev
+    chart.series[1].graphicalProperties.solidFill = color_net
+    chart.series[1].graphicalProperties.line.solidFill = color_net
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
+
+
+def _sheet_ebitda(wb, sheet_title, chart_title, subtitle,
+                  line_color, data, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "EBITDA margin"]
+    rows_data = []
+    for m in months:
+        rev = data["revenue"][m]
+        net = data["net"][m]
+        margin = (net / rev) if rev else 0.0
+        rows_data.append([_MONTHS_RU_CAP[m], round(margin, 4)])
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=2,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    chart.series[0].graphicalProperties.line.solidFill = line_color
+    chart.series[0].graphicalProperties.line.width = 25000
+    chart.series[0].smooth = True
+    chart.y_axis.numFmt = '0.0%'
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend = None
+
+    ws.add_chart(chart, "E4")
+
+
+def _sheet_ebitda_multi(wb, sheet_title, chart_title, subtitle,
+                        series_data, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+    return ws
+
+
+def _sheet_fot(wb, sheet_title, chart_title, subtitle,
+               line_color, data, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Доля ФОТ"]
+    rows_data = []
+    for m in months:
+        rev = data["revenue"][m]
+        fot = data["fot"][m]
+        share = (abs(fot) / rev) if rev else 0.0
+        rows_data.append([_MONTHS_RU_CAP[m], round(share, 4)])
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=2,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    chart.series[0].graphicalProperties.line.solidFill = line_color
+    chart.series[0].graphicalProperties.line.width = 25000
+    chart.series[0].smooth = True
+    chart.y_axis.numFmt = '0.0%'
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend = None
+
+    ws.add_chart(chart, "E4")
+
+
+def _sheet_breakeven(wb, sheet_title, chart_title, subtitle,
+                     data_revenue, data_breakeven, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Выручка", "Точка безубыточности"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_revenue.get(m, 0.0) or 0.0, 2),
+            round(data_breakeven.get(m, 0.0) or 0.0, 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    chart.series[0].graphicalProperties.line.solidFill = "4472C4"
+    chart.series[0].graphicalProperties.line.width = 25000
+    chart.series[0].smooth = True
+
+    chart.series[1].graphicalProperties.line.solidFill = "70AD47"
+    chart.series[1].graphicalProperties.line.width = 25000
+    chart.series[1].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
+
+
+def _sheet_dds(wb, sheet_title, chart_title, subtitle,
+               data_inflow, data_outflow, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "Поступления", "Выбытия"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_inflow.get(m, 0.0) or 0.0, 2),
+            round(data_outflow.get(m, 0.0) or 0.0, 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    chart.series[0].graphicalProperties.solidFill = "70AD47"
+    chart.series[0].graphicalProperties.line.solidFill = "70AD47"
+    chart.series[1].graphicalProperties.solidFill = "C00000"
+    chart.series[1].graphicalProperties.line.solidFill = "C00000"
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
+
+
+def _sheet_revenue_by_units(wb, sheet_title, chart_title, subtitle,
+                            series_data, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_ebitda_units(wb, sheet_title, chart_title, subtitle,
+                        series_data, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_fot_share_full(wb, sheet_title, chart_title, subtitle,
+                          series_data, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 4))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.line.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.width = 25000
+            chart.series[idx].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_ebitda_common(wb, sheet_title, chart_title, subtitle,
+                         data_values, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "EBITDA margin"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_values.get(m, 0.0) or 0.0, 4),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data, number_fmt='0.0%')
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=2,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = LineChart()
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.numFmt = '0.0%'
+
+    chart.series[0].graphicalProperties.line.solidFill = "70AD47"
+    chart.series[0].graphicalProperties.line.width = 25000
+    chart.series[0].smooth = True
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '0.0%'
+    chart.dLbls.position = "t"
+
+    chart.legend = None
+    ws.add_chart(chart, "H4")
+
+
+def _sheet_profit_dynamics(wb, sheet_title, chart_title, subtitle,
+                           series_data, months):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц"] + [s["name"] for s in series_data]
+    rows_data = []
+    for m in months:
+        row = [_MONTHS_RU_CAP[m]]
+        for s in series_data:
+            row.append(round(s["values"].get(m, 0.0) or 0.0, 2))
+        rows_data.append(row)
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=1 + len(series_data),
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 24
+    chart.height = 11
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    for idx, s in enumerate(series_data):
+        if idx < len(chart.series):
+            chart.series[idx].graphicalProperties.solidFill = s["color"]
+            chart.series[idx].graphicalProperties.line.solidFill = "FFFFFF"
+            chart.series[idx].graphicalProperties.line.width = 10000
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "ctr"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+    ws.add_chart(chart, "H4")
 
 
 # ============================================================
 # ГЛАВНАЯ ФУНКЦИЯ
 # ============================================================
 
-def build_report(template_name):
-    print(f"\n{'=' * 60}")
-    print(f"СБОРКА ОТЧЁТА: {template_name}")
-    print(f"{'=' * 60}")
+def _sheet_name_with_slide(slide_no, base_name):
+    return _safe_sheet(f"Сл{slide_no:02d}_{base_name}")
 
-    template_path = config.TEMPLATE_FILES[template_name]
-    output_path = config.OUTPUT_FILES[template_name]
 
-    if not template_path.exists():
-        msg = f"[ERROR] Шаблон не найден: {template_path}"
-        print(msg)
-        raise FileNotFoundError(msg)
+def _parse_bdr_plan(bdr_path, unit_name, months):
+    result = {m: 0.0 for m in months}
+    if not bdr_path or not os.path.exists(bdr_path):
+        return result
 
-    collected = collect_all_blocks(template_name)
+    wb = openpyxl.load_workbook(bdr_path, data_only=True)
+    ws = wb.active
 
-    wb = openpyxl.load_workbook(template_path)
-    if config.TEMPLATE_SHEET_NAME in wb.sheetnames:
-        ws = wb[config.TEMPLATE_SHEET_NAME]
-    else:
-        ws = wb.active
-
-    # Вторая загрузка того же файла с data_only=True:
-    # openpyxl с data_only возвращает вычисленные Excel значения
-    # вместо формул. Нужно для fallback-чтения закешированных
-    # значений в постпроцессинге консолидации.
-    wb_values = openpyxl.load_workbook(template_path, data_only=True)
-    if config.TEMPLATE_SHEET_NAME in wb_values.sheetnames:
-        ws_values = wb_values[config.TEMPLATE_SHEET_NAME]
-    else:
-        ws_values = wb_values.active
-
-    investments = {}
-    try:
-        investments = parse_investments(config.REF_INVESTMENTS_FILE)
-    except FileNotFoundError as e:
-        print(f"[WARN] {e}")
-
-    investments_cache = {}
-
-    # ============================================================
-    # ЦИКЛ ПО БЛОКАМ
-    # ============================================================
-    for block in config.TEMPLATE_BLOCKS[template_name]:
-        start = _find_block_start(ws, block)
-        if start == 0:
-            print(f"[WARN] блок не найден в шаблоне: {block}")
-            continue
-        if config.DEBUG:
-            end_preview = _find_block_end(ws, start)
-            print(f"[block] {block!r}: строки {start}..{end_preview}")
-        if block not in collected:
-            print(f"[WARN] данные не собраны: {block}")
-            continue
-
-        _write_block_header_dates(ws, start)
-        block_investments = _total_investments_for_block(
-            block, investments, investments_cache
-        )
-        _write_block(ws, start, collected[block], block_investments)
-        _write_detailed_rows(ws, block, start, collected)
-
-        _fix_valovaya_pribyl_formulas(ws, start)
-
-        _block_end = _find_block_end(ws, start)
-
-        # Пересчитываем «Прочие расходы» как сумму подстрок 3.x.
-        # НО: для блоков из EXTRA_CONSOLIDATION эту строку
-        # заполняет _postprocess_extra_consolidation, поэтому
-        # _fix_prochie_raskhody здесь вызывать НЕЛЬЗЯ (иначе
-        # она перезапишет результат консолидации нулём).
-        _extra_cons_blocks = set(
-            getattr(config, "EXTRA_CONSOLIDATION", {}).keys()
-        )
-        if block not in _extra_cons_blocks:
-            _fix_prochie_raskhody(ws, start, _block_end)
-
-        # 1. Сначала вычисляем агрегаты (SUM, A1+B1 и т.п.),
-        #    чтобы «Расходы» стали числом.
-        _recalc_aggregates(ws, start, _block_end)
-
-        # 1a. ← ДОБАВЛЕНО: вычисляем простые ссылки =C4
-        #     (нужно для шаблона Unelma).
-        _resolve_simple_refs(ws, start, _block_end)
-
-        # 1b. Принудительно раскрываем строку «Расходы» (знаменатель
-        #     долей) в числа, если она всё ещё формула.
-        _force_numeric_denominator(ws, start, _block_end)
-
-        # 2. Только ПОСЛЕ этого записываем формулы долей в D и I.
-        _fix_share_formulas(ws, start, _block_end)
-
-        # 3. ← ДОБАВЛЕНО: повторно вычисляем агрегаты — теперь,
-        #    когда доли записаны числами, некоторые формулы
-        #    могли стать вычислимыми.
-        _recalc_aggregates(ws, start, _block_end)
-
-        # 3a. ← ДОБАВЛЕНО: снова резолвим простые ссылки —
-        #     на случай, если после второго _recalc_aggregates
-        #     появились новые значения.
-        _resolve_simple_refs(ws, start, _block_end)
-
-    # ============================================================
-    # ПОСТОБРАБОТКА КОНСОЛИДАЦИИ СТРОК
-    # ============================================================
-    # Передаём ws_values для fallback-чтения формул в подблоках.
-    _postprocess_extra_consolidation(ws, template_name, ws_values)
-
-    # После консолидации строк («Прочие расходы» и т.п.) нужно
-    # ПЕРЕСЧИТАТЬ доли в тех блоках, куда мы только что что-то
-    # записали. Иначе доля для строки «Прочие расходы» останется 0.
-    extra_cons_blocks = set(
-        getattr(config, "EXTRA_CONSOLIDATION", {}).keys()
-    )
-    for block in config.TEMPLATE_BLOCKS[template_name]:
-        if block not in extra_cons_blocks:
-            continue
-        b_start = _find_block_start(ws, block)
-        if b_start == 0:
-            continue
-        b_end = _find_block_end(ws, b_start)
-
-        _recalc_aggregates(ws, b_start, b_end)
-        _force_numeric_denominator(ws, b_start, b_end)
-        _fix_share_formulas(ws, b_start, b_end)
-        if config.DEBUG:
-            print(f"[post-extra-cons] пересчитал агрегаты и доли "
-                  f"в блоке {block!r}")
-
-    # ============================================================
-    # ИСПРАВЛЕНИЕ ROI ВО ВСЕХ БЛОКАХ ESTATE
-    # ============================================================
-    # Вложения теперь пишутся только в колонку C, а формулы ROI
-    # в шаблоне ссылаются на E8/F8/H8/J8. Нужно переписать их так,
-    # чтобы знаменателем всегда была колонка C.
-    if template_name == "Estate":
-        _fix_roi_formulas_for_all_blocks(ws)
-
-    # ============================================================
-    # СПЕЦИАЛЬНАЯ ОБРАБОТКА БЛОКА «УК» (только для Estate)
-    # ============================================================
-    # Валовая Прибыль УК = ВП консолидированного блока − Расходы УК.
-    # ROI = ВП УК / Вложения, ПЛАНИРУЕМЫЙ ROI = ROI * 12.
-    if template_name == "Estate":
-        # Разворачиваем ВСЕ формулы в блоке ESTATE КОНСОЛИДИРОВАННЫЙ
-        # в числа — чтобы ВП УК считалась из уже посчитанных значений.
-        est_start = _find_block_start(ws, "ESTATE КОНСОЛИДИРОВАННЫЙ")
-        if est_start != 0:
-            est_end = _find_block_end(ws, est_start)
-            for _pass in range(20):
-                changed = False
-                for r in range(est_start, est_end + 1):
-                    for c in (3, 5, 6, 8, 10):
-                        cell = ws.cell(row=r, column=c)
-                        if type(cell).__name__ == "MergedCell":
-                            continue
-                        v = cell.value
-                        if not (isinstance(v, str) and v.startswith("=")):
-                            continue
-                        val = _eval_formula(ws, v)
-                        if val is not None:
-                            _safe_set_value(ws, r, c, val)
-                            changed = True
-                        elif config.DEBUG:
-                            print(f"[fix UK] НЕ развернулась {cell.coordinate}: {v!r}")
-                if not changed:
-                    break
-            if config.DEBUG:
-                print(f"[fix UK] развернул формулы блока "
-                      f"ESTATE КОНСОЛИДИРОВАННЫЙ (строки {est_start}..{est_end})")
-
-            # Рентабельность ESTATE КОНСОЛИДИРОВАННЫЙ
-            # = Валовая Прибыль / Выручка (внутри того же блока).
-            est_row_rev = None
-            est_row_vp = None
-            est_row_rent = None
-            for r in range(est_start + 1, est_end + 1):
-                title = ws.cell(row=r, column=2).value
-                if title is None:
-                    continue
-                t = _norm_for_compare(_strip_prefix(title))
-                if t == _norm_for_compare("Выручка") and est_row_rev is None:
-                    est_row_rev = r
-                elif t == _norm_for_compare("Валовая Прибыль") and est_row_vp is None:
-                    est_row_vp = r
-                elif t == _norm_for_compare("Рентабельность") and est_row_rent is None:
-                    est_row_rent = r
-
-            if (est_row_rev is not None
-                    and est_row_vp is not None
-                    and est_row_rent is not None):
-                for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-                    _safe_set_value(
-                        ws, est_row_rent, col_idx,
-                        f"={col_letter}{est_row_vp}/{col_letter}{est_row_rev}",
-                    )
-                # Разворачиваем формулу в число (или оставляем формулу —
-                # Excel пересчитает при открытии).
-                for _pass in range(5):
-                    changed = False
-                    for col_idx in (3, 5, 6, 8, 10):
-                        cell = ws.cell(row=est_row_rent, column=col_idx)
-                        if type(cell).__name__ == "MergedCell":
-                            continue
-                        v = cell.value
-                        if not (isinstance(v, str) and v.startswith("=")):
-                            continue
-                        val = _eval_formula(ws, v)
-                        if val is not None:
-                            _safe_set_value(ws, est_row_rent, col_idx, val)
-                            changed = True
-                    if not changed:
-                        break
-                # Процентный формат для строки «Рентабельность».
-                for col_idx in (3, 5, 6, 8, 10):
-                    cell = ws.cell(row=est_row_rent, column=col_idx)
-                    if type(cell).__name__ == "MergedCell":
-                        continue
-                    try:
-                        cell.number_format = '0.00%'
-                    except Exception:
-                        pass
-                if config.DEBUG:
-                    print(f"[fix UK] Рентабельность ESTATE КОНСОЛИДИРОВАННЫЙ "
-                          f"(стр.{est_row_rent}) = "
-                          f"=C{est_row_vp}/C{est_row_rev} "
-                          f"(ВП / Выручка)")
-
-        # Формулы блока УК
-        _fix_uk_formulas(ws)
-
-        # Пересчитываем формулы, которые только что проставили.
-        uk_start = _find_block_start(ws, "УК")
-        if uk_start != 0:
-            uk_end = _find_block_end(ws, uk_start)
-            # Многораундовый пересчёт для УК.
-            for _pass in range(20):
-                changed = False
-                for r in range(uk_start, uk_end + 1):
-                    for c in (3, 5, 6, 8, 10):
-                        cell = ws.cell(row=r, column=c)
-                        if type(cell).__name__ == "MergedCell":
-                            continue
-                        v = cell.value
-                        if not (isinstance(v, str) and v.startswith("=")):
-                            continue
-                        val = _eval_formula(ws, v)
-                        if val is not None:
-                            _safe_set_value(ws, r, c, val)
-                            changed = True
-                        elif config.DEBUG:
-                            print(f"[fix UK] НЕ развернулась {cell.coordinate}: {v!r}")
-                if not changed:
-                    break
-            _force_numeric_denominator(ws, uk_start, uk_end)
-
-    # ============================================================
-    # ФИНАЛЬНАЯ ПРОВЕРКА И СОХРАНЕНИЕ
-    # ============================================================
-    _postprocess_formulas(ws, template_name)
-    _verify_formulas(ws, template_name)
-
-    try:
-        wb.save(output_path)
-        print(f"[OK] Сохранено: {output_path}")
-    except PermissionError:
-        msg = (f"[ERROR] Файл открыт в Excel и не может быть перезаписан: "
-               f"{output_path}\n        Закройте его и повторите сборку.")
-        print(msg)
-        raise
-
-    return output_path
-
-def _fix_roi_formulas_for_all_blocks(ws):
-    """
-    Для всех блоков Estate переписывает формулы ROI и ПЛАНИРУЕМЫЙ ROI
-    так, чтобы знаменатель был всегда C<вложения> (абсолютная ссылка).
-
-    Зачем: после правки «вложения только в C» в E/F/H/J вложения пусты,
-    и формулы =E_ВП/E_Вложения дают 0. Теперь будет:
-      ROI в C = C_ВП/C_Вложения
-      ROI в E = E_ВП/C_Вложения
-      ROI в F = F_ВП/C_Вложения
-      ROI в H = H_ВП/C_Вложения
-      ROI в J = J_ВП/C_Вложения
-    """
-    for block_name in config.TEMPLATE_BLOCKS.get("Estate", []):
-        start = _find_block_start(ws, block_name)
-        if start == 0:
-            continue
-        end = _find_block_end(ws, start)
-
-        row_vp = None            # «4. Валовая Прибыль»
-        row_roi = None           # «6. ROI на вложенные средства, в месяц»
-        row_roi_year = None      # «7. ПЛАНИРУЕМЫЙ ROI на ГОД»
-        row_investments = None   # «8. Вложенные средства на объекты»
-
-        for r in range(start + 1, end + 1):
-            title = ws.cell(row=r, column=2).value
-            if title is None:
+    header_row = None
+    for r in range(1, 6):
+        hits = 0
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
                 continue
-            t = _norm_for_compare(_strip_prefix(title))
-            if t == _norm_for_compare("Валовая Прибыль") and row_vp is None:
-                row_vp = r
-            elif t == _norm_for_compare("ROI на вложенные средства, в месяц") and row_roi is None:
-                row_roi = r
-            elif t == _norm_for_compare("ПЛАНИРУЕМЫЙ ROI на ГОД") and row_roi_year is None:
-                row_roi_year = r
-            elif t == _norm_for_compare("Вложенные средства на объекты") and row_investments is None:
-                row_investments = r
+            sv = str(v).lower()
+            if any(m in sv for m in _MONTHS_RU_LOWER.values()):
+                hits += 1
+        if hits >= 3:
+            header_row = r
+            break
 
-        if row_vp is None or row_roi is None or row_investments is None:
-            if config.DEBUG:
-                print(f"[fix ROI] {block_name!r}: не хватает строк — пропускаю "
-                      f"(ВП={row_vp}, ROI={row_roi}, Вложения={row_investments})")
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    cur_section = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
             continue
+        title = _clean(raw)
+        lvl = _level(raw)
 
-        # ROI: =<col>ВП / $C$<вложения>
-        for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-            _safe_set_value(
-                ws, row_roi, col_idx,
-                f"={col_letter}{row_vp}/$C${row_investments}",
-            )
+        if lvl == 0:
+            cur_section = title
+            continue
+        if lvl == 1 and cur_section == "Чистая прибыль" and title == unit_name:
+            for m, col in month_col.items():
+                result[m] = _num(ws, r, col)
+            return result
 
-        # ПЛАНИРУЕМЫЙ ROI: =<col>ROI * 12
-        if row_roi_year is not None:
-            for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-                _safe_set_value(
-                    ws, row_roi_year, col_idx,
-                    f"={col_letter}{row_roi}*12",
+    return result
+
+
+def _parse_bdr_plan_object(bdr_path, unit_name, object_name, months):
+    result = {m: 0.0 for m in months}
+    if not bdr_path or not os.path.exists(bdr_path):
+        return result
+
+    wb = openpyxl.load_workbook(bdr_path, data_only=True)
+    ws = wb.active
+
+    header_row = None
+    for r in range(1, 6):
+        hits = 0
+        for c in range(2, min(ws.max_column, 20) + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            sv = str(v).lower()
+            if any(m in sv for m in _MONTHS_RU_LOWER.values()):
+                hits += 1
+        if hits >= 3:
+            header_row = r
+            break
+
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    cur_section = None
+    cur_unit = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+
+        if lvl == 0:
+            cur_section = title
+            cur_unit = None
+            continue
+        if lvl == 1:
+            cur_unit = title
+            continue
+        if (lvl == 2
+                and cur_section == "Чистая прибыль"
+                and cur_unit == unit_name
+                and title == object_name):
+            for m, col in month_col.items():
+                result[m] = _num(ws, r, col)
+            return result
+
+    return result
+
+
+def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
+                     data_plan, data_fact, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Месяц", "План", "Факт"]
+    rows_data = []
+    for m in months:
+        rows_data.append([
+            _MONTHS_RU_CAP[m],
+            round(data_plan.get(m, 0.0), 2),
+            round(data_fact.get(m, 0.0), 2),
+        ])
+    _write_month_table(ws, header_row, headers, rows_data)
+
+    cats = Reference(ws, min_col=1,
+                     min_row=header_row + 1,
+                     max_row=header_row + len(months))
+    data_ref = Reference(ws, min_col=2, max_col=3,
+                         min_row=header_row,
+                         max_row=header_row + len(months))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 60
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.title = chart_title
+    chart.width = 20
+    chart.height = 10
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.majorGridlines = None
+
+    chart.series[0].graphicalProperties.solidFill = _COLOR_LINE_YEL
+    chart.series[1].graphicalProperties.solidFill = _COLOR_NET
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "outEnd"
+
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+
+    ws.add_chart(chart, "E4")
+
+
+def _sheet_operational_balance(wb, sheet_title, chart_title, subtitle,
+                               rows_data, months):
+    ws = wb.create_sheet(sheet_title)
+
+    _write_header(ws, chart_title, subtitle)
+
+    header_row = 4
+    headers = ["Направление"] + [_MONTHS_RU_CAP[m] for m in months]
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+
+    for i, row in enumerate(rows_data):
+        r = header_row + 1 + i
+        name_cell = ws.cell(row=r, column=1, value=row["name"])
+        name_cell.border = _CELL_BORDER
+        name_cell.alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=False)
+
+        if row.get("is_total"):
+            name_cell.font = Font(bold=True, size=11, color="1E3A8A")
+
+        for j, m in enumerate(months):
+            v = row["values"].get(m, 0.0)
+            cell = ws.cell(row=r, column=2 + j, value=round(v, 2))
+            cell.border = _CELL_BORDER
+            cell.number_format = '#,##0'
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+
+            if v > 0.005:
+                cell.font = Font(color="00B050", bold=True)
+            elif v < -0.005:
+                cell.font = Font(color="0070C0", bold=True)
+
+            if row.get("is_total"):
+                cell.font = Font(
+                    color=("00B050" if v > 0.005 else
+                           "0070C0" if v < -0.005 else "000000"),
+                    bold=True,
                 )
 
-        # Разворачиваем формулы в числа (или оставляем — Excel пересчитает)
-        for _pass in range(5):
-            changed = False
-            for rr in (row_roi, row_roi_year):
-                if rr is None:
-                    continue
-                for col_idx in (3, 5, 6, 8, 10):
-                    cell = ws.cell(row=rr, column=col_idx)
-                    if type(cell).__name__ == "MergedCell":
-                        continue
-                    v = cell.value
-                    if not (isinstance(v, str) and v.startswith("=")):
-                        continue
-                    val = _eval_formula(ws, v)
-                    if val is not None:
-                        _safe_set_value(ws, rr, col_idx, val)
-                        changed = True
-                    elif config.DEBUG:
-                        print(f"[fix ROI]   НЕ развернул {cell.coordinate}: {v!r}")
-            if not changed:
+    ws.column_dimensions["A"].width = 45
+    for c in range(2, 2 + len(months)):
+        col_letter = ws.cell(row=header_row, column=c).column_letter
+        ws.column_dimensions[col_letter].width = 12
+
+
+def _find_ku_sheet(wb_ku, month_name):
+    def _looks_like_ku(ws):
+        header_row = None
+        for r in range(1, 20):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "объекты" in v.lower():
+                header_row = r
                 break
+        if header_row is None:
+            return False
+        has_total = False
+        for r in range(header_row + 1,
+                       min(header_row + 30, ws.max_row + 1)):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "итого" in v.lower():
+                has_total = True
+                break
+        if not has_total:
+            return False
+        for r in range(header_row + 1,
+                       min(header_row + 5, ws.max_row + 1)):
+            e_val = _num(ws, r, 5)
+            if e_val > 0:
+                return True
+            if e_val < 0:
+                return False
+        return False
 
-        # Финальная страховка: если формула ROI всё ещё не развернулась —
-        # считаем её вручную через прямое чтение ячеек ВП и Вложений.
-        for col_idx in (3, 5, 6, 8, 10):
-            cell = ws.cell(row=row_roi, column=col_idx)
-            v = cell.value
-            if isinstance(v, str) and v.startswith("="):
-                vp_cell = ws.cell(row=row_vp, column=col_idx)
-                inv_cell = ws.cell(row=row_investments, column=3)  # всегда C
-                vp_val = vp_cell.value
-                inv_val = inv_cell.value
-                if isinstance(vp_val, str) and vp_val.startswith("="):
-                    vp_val = _eval_formula(ws, vp_val)
-                if isinstance(inv_val, str) and inv_val.startswith("="):
-                    inv_val = _eval_formula(ws, inv_val)
-                try:
-                    vp_num = float(vp_val) if vp_val is not None else 0.0
-                    inv_num = float(inv_val) if inv_val is not None else 0.0
-                    if inv_num != 0:
-                        _safe_set_value(ws, row_roi, col_idx, vp_num / inv_num)
-                except (ValueError, TypeError):
-                    pass
+    for ws in wb_ku.worksheets:
+        if _looks_like_ku(ws):
+            return ws
 
-            # И то же для ПЛАНИРУЕМЫЙ ROI = ROI * 12
-            if row_roi_year is not None:
-                cell_y = ws.cell(row=row_roi_year, column=col_idx)
-                v_y = cell_y.value
-                if isinstance(v_y, str) and v_y.startswith("="):
-                    roi_cell = ws.cell(row=row_roi, column=col_idx)
-                    roi_val = roi_cell.value
-                    if isinstance(roi_val, str) and roi_val.startswith("="):
-                        roi_val = _eval_formula(ws, roi_val)
-                    try:
-                        roi_num = float(roi_val) if roi_val is not None else 0.0
-                        _safe_set_value(ws, row_roi_year, col_idx, roi_num * 12)
-                    except (ValueError, TypeError):
-                        pass
+    if month_name in wb_ku.sheetnames:
+        return wb_ku[month_name]
 
-        if config.DEBUG:
-            print(f"[fix ROI] {block_name!r}: ROI стр.{row_roi}, "
-                  f"ROI_год стр.{row_roi_year}, "
-                  f"вложения стр.{row_investments} (делён. на $C${row_investments})")
+    for ws in wb_ku.worksheets:
+        for r in range(1, 20):
+            v = _clean(ws.cell(row=r, column=1).value)
+            if v and "объекты" in v.lower():
+                return ws
 
-def _fix_uk_formulas(ws):
-    """
-    Явно проставляет формулы для блока «УК»:
-      - Валовая Прибыль = ВП блока ESTATE КОНСОЛИДИРОВАННЫЙ - Расходы УК
-      - ROI = Валовая Прибыль УК / Вложенные средства
-      - ПЛАНИРУЕМЫЙ ROI = ROI * 12
+    return wb_ku.active
 
-    Строки определяются по названиям, а не по номерам, — чтобы
-    работать при любом шаблоне.
-    """
-    # 1) Находим начало и конец блока УК.
-    uk_start = _find_block_start(ws, "УК")
-    if uk_start == 0:
-        if config.DEBUG:
-            print("[fix UK] блок 'УК' не найден — пропускаю")
-        return
-    uk_end = _find_block_end(ws, uk_start)
 
-    # 2) Находим начало и конец блока ESTATE КОНСОЛИДИРОВАННЫЙ.
-    est_start = _find_block_start(ws, "ESTATE КОНСОЛИДИРОВАННЫЙ")
-    if est_start == 0:
-        if config.DEBUG:
-            print("[fix UK] блок 'ESTATE КОНСОЛИДИРОВАННЫЙ' не найден — пропускаю")
-        return
-    est_end = _find_block_end(ws, est_start)
+def _find_odds_month_col(ws_ku, month_name):
+    header_row = None
+    for r in range(1, 8):
+        v = _clean(ws_ku.cell(row=r, column=1).value)
+        if v and "направление" in v.lower():
+            header_row = r
+            break
+    if header_row is None:
+        return None
 
-    # 3) В блоке УК ищем нужные строки.
-    uk_row_expenses = None       # «2. Расходы»
-    uk_row_valprofit = None      # «4. Валовая Прибыль»
-    uk_row_roi = None            # «6. ROI на вложенные средства, в месяц»
-    uk_row_roi_year = None       # «7. ПЛАНИРУЕМЫЙ ROI на ГОД»
-    uk_row_investments = None    # «8. Вложенные средства на объекты»
-
-    for r in range(uk_start + 1, uk_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
+    mn = month_name.lower()
+    for c in range(2, ws_ku.max_column + 1):
+        v = ws_ku.cell(row=header_row, column=c).value
+        if v is None:
             continue
-        t = _norm_for_compare(_strip_prefix(title))
-        if t == _norm_for_compare("Расходы") and uk_row_expenses is None:
-            uk_row_expenses = r
-        elif t == _norm_for_compare("Валовая Прибыль") and uk_row_valprofit is None:
-            uk_row_valprofit = r
-        elif t == _norm_for_compare("ROI на вложенные средства, в месяц") and uk_row_roi is None:
-            uk_row_roi = r
-        elif t == _norm_for_compare("ПЛАНИРУЕМЫЙ ROI на ГОД") and uk_row_roi_year is None:
-            uk_row_roi_year = r
-        elif t == _norm_for_compare("Вложенные средства на объекты") and uk_row_investments is None:
-            uk_row_investments = r
+        sv = str(v).lower()
+        if mn in sv:
+            return c
+    return None
 
-    # 4) В блоке ESTATE КОНСОЛИДИРОВАННЫЙ ищем строку «Валовая Прибыль».
-    est_row_valprofit = None
-    for r in range(est_start + 1, est_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
+
+def _sheet_utility_reimbursement(wb, sheet_title, chart_title, subtitle,
+                                  ku_path, month_name, subtract_object=None):
+    ws = wb.create_sheet(sheet_title)
+    _write_header(ws, chart_title, subtitle)
+
+    header_row_1 = 3
+    header_row_2 = 4
+    header_row_3 = 5
+    header_row = header_row_3
+
+    row3_headers = [
+        "EUR",
+        "Разница между выставленными счетами и фактическими коммунальными расходами с НДС с начала года",
+        "Выставлено в сентябре (за август 2026) арендаторам",
+        "в т.ч. НДС",
+        "1.2.10.1 Мусор*",
+        "1.2.10.2 Газ*",
+        "1.2.10.3 Вода*",
+        "1.2.10.4 Отопление*",
+        "1.2.10.5 Электричество*",
+        "1.2.10.6 Коммунальные УК дома*",
+        "Всего расходов на коммунальные услуги*",
+        "Разница между выставленными счетами и фактическими коммунальными расходами за отчётный месяц (гр. 3 -гр.11)",
+        "1.1.2.3 Компенсация по коммунальным расходам-Поступившая на счет",
+        "Задолженность по возмещению КУ за отчётный месяц (гр.13 - гр.3)",
+    ]
+    for c, h in enumerate(row3_headers, start=1):
+        cell = ws.cell(row=header_row_1, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _CELL_BORDER
+
+    ws.cell(row=header_row_2, column=1, value="Объекты").fill = _HEADER_FILL
+    ws.cell(row=header_row_2, column=1).font = _HEADER_FONT
+    ws.cell(row=header_row_2, column=1).alignment = Alignment(
+        horizontal="center", vertical="center")
+    ws.cell(row=header_row_2, column=1).border = _CELL_BORDER
+    for c in range(2, 15):
+        cell = ws.cell(row=header_row_2, column=c)
+        cell.fill = _HEADER_FILL
+        cell.border = _CELL_BORDER
+
+    for c in range(1, 15):
+        cell = ws.cell(row=header_row_3, column=c, value=c)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _CELL_BORDER
+
+    if not ku_path or not os.path.exists(ku_path):
+        print(f"[presentation_builder] не найден файл КУ: {ku_path}")
+        return ws
+
+    wb_ku = openpyxl.load_workbook(ku_path, data_only=True)
+    ws_ku = wb_ku.active
+
+    month_col = _find_odds_month_col(ws_ku, month_name)
+    if month_col is None:
+        print(f"[presentation_builder] в файле {ku_path} "
+              f"не найдена колонка для месяца «{month_name}»")
+        return ws
+
+    def _category(t):
+        tl = t.lower()
+        if "1.2.10.1" in tl:
+            return "musor"
+        if "1.2.10.2" in tl:
+            return "gaz"
+        if "1.2.10.3" in tl:
+            return "voda"
+        if "1.2.10.4" in tl:
+            return "otopl"
+        if "1.2.10.5" in tl:
+            return "elektr"
+        if "1.2.10.6" in tl:
+            return "uk_doma"
+        return None
+
+    data_by_obj = {}
+    cur_obj = None
+    cur_obj_level = None
+
+    for r in range(1, ws_ku.max_row + 1):
+        raw = ws_ku.cell(row=r, column=1).value
+        if raw is None:
             continue
-        t = _norm_for_compare(_strip_prefix(title))
-        if t == _norm_for_compare("Валовая Прибыль"):
-            est_row_valprofit = r
+        title = _clean(raw)
+        lvl = _level(raw)
+
+        if lvl == 0:
+            cur_obj = None
+            cur_obj_level = None
+            continue
+
+        if lvl == 1:
+            cur_obj = title
+            cur_obj_level = lvl
+            if cur_obj not in data_by_obj:
+                data_by_obj[cur_obj] = {
+                    "musor": 0.0, "gaz": 0.0, "voda": 0.0,
+                    "otopl": 0.0, "elektr": 0.0, "uk_doma": 0.0,
+                }
+            continue
+
+        if cur_obj is None:
+            continue
+        if lvl <= cur_obj_level:
+            cur_obj = None
+            cur_obj_level = None
+            continue
+
+        cat = _category(title)
+        if cat is None:
+            continue
+        val = _num(ws_ku, r, month_col)
+        data_by_obj[cur_obj][cat] += abs(val)
+
+    row_out = header_row + 1
+    data_rows = []
+
+    for ku_name in config.KU_OBJECTS:
+        odd_name = config.KU_TO_ODDS_NAME.get(ku_name, ku_name)
+
+        if subtract_object and ku_name == subtract_object:
+            continue
+
+        d = data_by_obj.get(odd_name)
+        if d is None:
+            ws.cell(row=row_out, column=1, value=ku_name).border = _CELL_BORDER
+            for c in range(2, 15):
+                ws.cell(row=row_out, column=c).border = _CELL_BORDER
+            data_rows.append(row_out)
+            row_out += 1
+            continue
+
+        ws.cell(row=row_out, column=1, value=ku_name).border = _CELL_BORDER
+        ws.cell(row=row_out, column=2).border = _CELL_BORDER
+        ws.cell(row=row_out, column=3).border = _CELL_BORDER
+        ws.cell(row=row_out, column=4).border = _CELL_BORDER
+
+        ws.cell(row=row_out, column=5,
+                value=round(d["musor"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=6,
+                value=round(d["gaz"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=7,
+                value=round(d["voda"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=8,
+                value=round(d["otopl"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=9,
+                value=round(d["elektr"], 2)).border = _CELL_BORDER
+        ws.cell(row=row_out, column=10,
+                value=round(d["uk_doma"], 2)).border = _CELL_BORDER
+
+        ws.cell(row=row_out, column=11,
+                value=f"=SUM(E{row_out}:J{row_out})").border = _CELL_BORDER
+        ws.cell(row=row_out, column=11).number_format = '#,##0'
+
+        ws.cell(row=row_out, column=12).border = _CELL_BORDER
+        ws.cell(row=row_out, column=13).border = _CELL_BORDER
+        ws.cell(row=row_out, column=14).border = _CELL_BORDER
+
+        for c in range(5, 11):
+            ws.cell(row=row_out, column=c).number_format = '#,##0'
+
+        data_rows.append(row_out)
+        row_out += 1
+
+    total_row = row_out
+    ws.cell(row=total_row, column=1, value="Итого").font = Font(bold=True)
+    ws.cell(row=total_row, column=1).border = _CELL_BORDER
+    for c in range(2, 15):
+        ws.cell(row=total_row, column=c).border = _CELL_BORDER
+
+    if data_rows:
+        first_data = data_rows[0]
+        last_data = data_rows[-1]
+        for c in range(5, 12):
+            col_letter = get_column_letter(c)
+            formula = f"=SUM({col_letter}{first_data}:{col_letter}{last_data})"
+            cell = ws.cell(row=total_row, column=c, value=formula)
+            cell.font = Font(bold=True)
+            cell.number_format = '#,##0'
+            cell.border = _CELL_BORDER
+    else:
+        for c in range(5, 12):
+            ws.cell(row=total_row, column=c, value=0).border = _CELL_BORDER
+
+    ws.column_dimensions["A"].width = 30
+    for c in range(2, 15):
+        ws.column_dimensions[get_column_letter(c)].width = 14
+
+    return ws
+
+
+def _collect_dds(odds_path, unit_name, months):
+    result = {
+        "inflow":  {m: 0.0 for m in months},
+        "outflow": {m: 0.0 for m in months},
+    }
+    if not odds_path or not os.path.exists(odds_path):
+        return result
+
+    wb = openpyxl.load_workbook(odds_path, data_only=True)
+    ws = wb.active
+
+    header_row = None
+    for r in range(1, 8):
+        v = ws.cell(row=r, column=1).value
+        if v and "направление" in str(v).lower():
+            header_row = r
+            break
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    unit_row = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
+            continue
+        title = _clean(raw)
+        lvl = _level(raw)
+        if lvl == 0 and title == unit_name:
+            unit_row = r
             break
 
-    if config.DEBUG:
-        print(f"[fix UK] УК: Расходы={uk_row_expenses}, ВП={uk_row_valprofit}, "
-              f"ROI={uk_row_roi}, ROI_год={uk_row_roi_year}, "
-              f"Вложения={uk_row_investments}; "
-              f"ВП консолидированного={est_row_valprofit}")
+    if unit_row is None:
+        return result
 
-    # 5) Подставляем формулы.
-    if (uk_row_valprofit is None
-            or uk_row_expenses is None
-            or est_row_valprofit is None):
+    unit_values = {}
+    for m, col in month_col.items():
+        unit_values[m] = _num(ws, unit_row, col) or 0.0
+
+    has_positive_in_unit_row = any(v > 0 for v in unit_values.values())
+
+    if has_positive_in_unit_row:
+        inflow_row  = unit_row
+        outflow_row = unit_row + 1
+
+        for m, col in month_col.items():
+            result["inflow"][m]  = _num(ws, inflow_row, col) or 0.0
+            result["outflow"][m] = abs(_num(ws, outflow_row, col) or 0.0)
+
         if config.DEBUG:
-            print("[fix UK] не хватает одной из строк — ВП УК не будет задана")
+            print(f"[DDS] {unit_name}: вариант A "
+                  f"(строка {unit_row} = Поступления, "
+                  f"строка {outflow_row} = Списания)")
+
     else:
-        for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-            _safe_set_value(
-                ws, uk_row_valprofit, col_idx,
-                f"={col_letter}{est_row_valprofit}-{col_letter}{uk_row_expenses}",
-            )
+        outflow_row = unit_row + 1
+        inflow_row  = unit_row + 2
 
+        for m, col in month_col.items():
+            result["outflow"][m] = abs(_num(ws, outflow_row, col) or 0.0)
+            result["inflow"][m]  = _num(ws, inflow_row, col) or 0.0
 
-    if (uk_row_roi is None
-            or uk_row_valprofit is None
-            or uk_row_investments is None):
         if config.DEBUG:
-            print("[fix UK] не хватает одной из строк — ROI УК не будет задан")
-    else:
-        # >>> ИЗМЕНЕНО: ROI УК во всех колонках делится на C-вложения.
-        # Вложения записаны только в колонке C (там реальные данные),
-        # в E/F/H/J их нет. Поэтому для всех колонок используем
-        # абсолютную ссылку $C${uk_row_investments}.
-        for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-            _safe_set_value(
-                ws, uk_row_roi, col_idx,
-                f"={col_letter}{uk_row_valprofit}/$C${uk_row_investments}",
-            )
+            print(f"[DDS] {unit_name}: вариант B "
+                  f"(строка {outflow_row} = Списания, "
+                  f"строка {inflow_row} = Поступления)")
 
-    if uk_row_roi_year is None or uk_row_roi is None:
-        if config.DEBUG:
-            print("[fix UK] не хватает одной из строк — ПЛАНИРУЕМЫЙ ROI УК не будет задан")
-    else:
-        for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-            _safe_set_value(
-                ws, uk_row_roi_year, col_idx,
-                f"={col_letter}{uk_row_roi}*12",
-            )
+    return result
 
-    # >>> ДОБАВЛЕНО: Рентабельность УК = ВП УК / Расходы УК.
-    uk_row_rent = None
-    for r in range(uk_start + 1, uk_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
+
+def _parse_odds_balance(odds_path, unit_name, months):
+    result = {"rows": []}
+    if not odds_path or not os.path.exists(odds_path):
+        return result
+
+    wb = openpyxl.load_workbook(odds_path, data_only=True)
+    ws = wb.active
+
+    header_row = None
+    for r in range(1, 8):
+        v = ws.cell(row=r, column=1).value
+        if v and "направление" in str(v).lower():
+            header_row = r
+            break
+    if header_row is None:
+        return result
+
+    month_col = _find_month_columns(ws, header_row, months)
+
+    unit_row = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
             continue
-        t = _norm_for_compare(_strip_prefix(title))
-        if t == _norm_for_compare("Рентабельность"):
-            uk_row_rent = r
+        title = _clean(raw)
+        lvl = _level(raw)
+        if lvl == 0 and title == unit_name:
+            unit_row = r
             break
 
-    # >>> ИЗМЕНЕНО: Рентабельность УК = ВП УК / Выручка консолидированная.
-    # (Раньше было ВП УК / Расходы УК — это неверно.)
-    # В блоке ESTATE КОНСОЛИДИРОВАННЫЙ ищем строку «Выручка».
-    est_row_revenue = None
-    for r in range(est_start + 1, est_end + 1):
-        title = ws.cell(row=r, column=2).value
-        if title is None:
+    if unit_row is None:
+        return result
+
+    objects = []
+    cur_object_name = None
+    cur_object_level = None
+
+    for r in range(unit_row + 1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        if raw is None:
             continue
-        t = _norm_for_compare(_strip_prefix(title))
-        if t == _norm_for_compare("Выручка"):
-            est_row_revenue = r
+        title = _clean(raw)
+        lvl = _level(raw)
+
+        if lvl == 0 and title != unit_name:
             break
 
-    if (uk_row_rent is not None
-            and uk_row_valprofit is not None
-            and est_row_revenue is not None):
-        for col_letter, col_idx in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("J", 10)):
-            _safe_set_value(
-                ws, uk_row_rent, col_idx,
-                f"={col_letter}{uk_row_valprofit}/{col_letter}{est_row_revenue}",
-            )
-        if config.DEBUG:
-            print(f"[fix UK] Рентабельность УК (стр.{uk_row_rent}) = "
-                  f"=C{uk_row_valprofit}/C{est_row_revenue} "
-                  f"(ВП УК / Выручка консолидированная)")
-
-    # >>> ДОБАВЛЕНО: ставим процентный формат для строк 5 (Рентабельность),
-    # 6 (ROI) и 7 (ПЛАНИРУЕМЫЙ ROI) в блоке УК.
-    # Значение в ячейке остаётся долей (0.0012), а Excel показывает
-    # его как процент (0.12%).
-    for row_num in (uk_row_rent, uk_row_roi, uk_row_roi_year):
-        if row_num is None:
-            continue
-        for col_idx in (3, 5, 6, 8, 10):   # C, E, F, H, J
-            cell = ws.cell(row=row_num, column=col_idx)
-            if type(cell).__name__ == "MergedCell":
+        if lvl == 1:
+            if title.lower() in ("сальдо", "итого",
+                                 "сальдо по направлению"):
+                values = {m: _num(ws, r, col) for m, col in month_col.items()}
+                result["rows"].append({
+                    "name": "ИТОГО",
+                    "values": values,
+                    "is_total": True,
+                })
+                cur_object_name = None
                 continue
-            try:
-                cell.number_format = '0.00%'
-            except Exception:
-                pass
 
-def build_all_reports(reports=None):
-    if reports is None:
-        reports = ["Estate", "Unelma", "Nomiqa"]
-
-    for name in reports:
-        if name not in config.TEMPLATE_FILES:
-            print(f"[ERROR] Неизвестный отчёт: {name}")
+            cur_object_name = title
+            cur_object_level = lvl
             continue
 
-        missing = config.check_inputs(name)
-        missing_all = []
-        for key in ("template", "opiu_prev", "opiu_cur", "bdr", "forecast"):
-            for p in missing[key]:
-                missing_all.append((key, p))
-
-        only_missing_template = all(k == "template" for k, _ in missing_all)
-
-        if missing_all and only_missing_template:
-            print(f"\n[ERROR] {name}: не найден шаблон — отчёт НЕ строится.")
-            for key, p in missing_all:
-                print(f"    • Шаблон: {p}")
+        if lvl == 2 and cur_object_name is not None:
+            if title.lower() in ("сальдо", "итого"):
+                values = {m: _num(ws, r, col) for m, col in month_col.items()}
+                objects.append({
+                    "name": cur_object_name,
+                    "values": values,
+                })
+                cur_object_name = None
+                cur_object_level = None
             continue
 
-        if missing_all:
-            print(f"\n[WARN] {name}: часть входных файлов отсутствует — "
-                  f"соответствующие колонки будут нулевыми.")
-            _labels = {
-                "template":  "Шаблон",
-                "opiu_prev": "ОПиУ за прошлый месяц",
-                "opiu_cur":  "ОПиУ за текущий месяц",
-                "bdr":       "БДиР",
-                "forecast":  "Прогноз месячный",
-            }
-            for key, p in missing_all:
-                print(f"    • {_labels[key]}: {p}")
+    rows_out = []
+    total_row = None
+    for row in result["rows"]:
+        if row.get("is_total"):
+            total_row = row
+        else:
+            rows_out.append(row)
 
-        try:
-            build_report(name)
-        except Exception as e:
-            print(f"[ERROR] {name}: {e}")
+    for o in objects:
+        rows_out.append(o)
+
+    if total_row is not None:
+        rows_out.append(total_row)
+
+    result["rows"] = rows_out
+    return result
+
+
+def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
+                                data_plan, data_fact, months,
+                                plan_label, fact_label):
+    ws = wb.create_sheet(sheet_title)
+
+    header_row = 2
+    fact_row   = 3
+    plan_row   = 4
+
+    ws.cell(row=header_row, column=1, value="Показатель").font = Font(bold=True)
+    for i, m in enumerate(months, start=2):
+        ws.cell(row=header_row, column=i,
+                value=_MONTHS_RU_LOWER[m].capitalize()).font = Font(bold=True)
+
+    ws.cell(row=fact_row, column=1, value="Факт").font = Font(bold=True)
+    ws.cell(row=plan_row, column=1, value="План").font = Font(bold=True)
+
+    for i, m in enumerate(months, start=2):
+        hc = ws.cell(row=header_row, column=i)
+        hc.font = Font(color="FFFFFF", size=8)
+
+        fc = ws.cell(row=fact_row, column=i,
+                     value=float(data_fact.get(m, 0.0) or 0.0))
+        fc.number_format = '#,##0'
+        fc.font = Font(color="FFFFFF", size=8)
+
+        pc = ws.cell(row=plan_row, column=i,
+                     value=float(data_plan.get(m, 0.0) or 0.0))
+        pc.number_format = '#,##0'
+        pc.font = Font(color="FFFFFF", size=8)
+
+    chart = BarChart()
+    chart.type = "bar"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+
+    data_ref = Reference(
+        ws,
+        min_col=2, max_col=1 + len(months),
+        min_row=header_row, max_row=plan_row,
+    )
+    cats_ref = Reference(
+        ws,
+        min_col=1,
+        min_row=fact_row, max_row=plan_row,
+    )
+
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats_ref)
+
+    for idx, series in enumerate(chart.series):
+        if idx < len(months):
+            m = months[idx]
+            color = _MONTH_FILL.get(m, "808080")
+            series.graphicalProperties.solidFill = color
+            series.graphicalProperties.line.solidFill = "FFFFFF"
+            series.graphicalProperties.line.width = 10000
+
+    chart.width = 32
+    chart.height = 11
+    chart.title = chart_title
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "ctr"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.x_axis.numFmt = '#,##0'
+    chart.x_axis.majorTickMark = "out"
+    chart.x_axis.tickLblPos = "nextTo"
+    chart.x_axis.title = "Периоды"
+
+    chart.y_axis.majorTickMark = "out"
+    chart.y_axis.tickLblPos = "nextTo"
+
+    chart.x_axis.majorGridlines = None
+    chart.y_axis.majorGridlines = None
+
+    from openpyxl.utils import column_index_from_string
+    anchor_col_idx = column_index_from_string("A") - 1
+    anchor_row_idx = 6 - 1
+    anchor = OneCellAnchor(
+        _from=AnchorMarker(
+            col=anchor_col_idx,
+            colOff=0,
+            row=anchor_row_idx,
+            rowOff=0,
+        ),
+        ext=XDRPositiveSize2D(
+            cx=cm_to_EMU(chart.width),
+            cy=cm_to_EMU(chart.height),
+        ),
+    )
+    chart.anchor = anchor
+
+    ws.add_chart(chart)
+
+    sum_plan = sum(float(data_plan.get(m, 0.0) or 0.0) for m in months)
+    sum_fact = sum(float(data_fact.get(m, 0.0) or 0.0) for m in months)
+    pct = (sum_fact / sum_plan) if sum_plan else 0.0
+
+    box_col = max(13, len(months) + 5)
+    box_row = 2
+
+    for i, (val, fmt) in enumerate([
+        (round(sum_plan, 0), '#,##0'),
+        (round(sum_fact, 0), '#,##0'),
+        (round(pct, 4),      '0.0%'),
+    ]):
+        c_val = ws.cell(row=box_row + i, column=box_col, value=val)
+        c_val.font = Font(bold=True, color="FFC000", size=14)
+        c_val.alignment = Alignment(horizontal="center", vertical="center")
+        c_val.fill = PatternFill("solid", fgColor="1F3864")
+        c_val.border = _CELL_BORDER
+        c_val.number_format = fmt
+
+    ws.column_dimensions["A"].width = 22
+    for i in range(2, 2 + len(months)):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    ws.column_dimensions[get_column_letter(box_col)].width = 14
+
+    ws.sheet_view.showGridLines = False
+    return ws
+
+
+_MONTH_FILL = {
+    1: "4472C4", 2: "8FAADC", 3: "FFC000", 4: "548235",
+    5: "ED7D31", 6: "9DC3E6", 7: "7030A0", 8: "BFB100",
+    9: "2E4C99", 10: "C55A11", 11: "375623", 12: "203864",
+}
+
+_TOTAL_BAR_COLUMNS = 50
+
+
+def build_presentation_data(opiu_path, bdr_path, forecast_path,
+                            year, month, output_path):
+    months = list(range(1, month + 1))
+
+    rows, _ = _read_flat_rows(opiu_path, months)
+    if not rows:
+        print("[presentation_builder] нет данных — файл пустой")
+        return output_path
+
+    units = _collect_units(rows, months)
+    if not units:
+        print("[presentation_builder] _collect_units вернул пусто")
+        return output_path
+
+    # НОВЫЙ расчёт ТБУ — с разделением на переменные и постоянные
+    breakeven_data = _collect_breakeven(rows, months)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    unit_slides = {
+        "Latvia":       (_UNIT_SLIDE_START["Latvia"],     5,  7),
+        "East-Восток":  (_UNIT_SLIDE_START["East-Восток"], 42, 40),
+        "Europe":       (_UNIT_SLIDE_START["Europe"],     51, 52),
+        "Nomiqa":       (_UNIT_SLIDE_START["Nomiqa"],     73, 0),
+        "Unelma":       (_UNIT_SLIDE_START["Unelma"],     68, 0),
+        "UK Estate":    (0, 0, 0),
+    }
+
+    for unit_name in _UNITS:
+        u = units.get(unit_name)
+        if not u:
+            continue
+
+        sl_opiu, sl_ebitda, sl_fot = unit_slides.get(
+            unit_name, (_UNIT_SLIDE_START.get(unit_name, 1), 0, 0)
+        )
+
+        if unit_name == "Latvia":
+            ebitda_color = _COLOR_LINE_RED
+            fot_color    = _COLOR_LINE_RED
+        elif unit_name == "East-Восток":
+            ebitda_color = _COLOR_LINE_YEL
+            fot_color    = _COLOR_LINE_RED
+        else:
+            ebitda_color = _COLOR_LINE_YEL
+            fot_color    = _COLOR_LINE_RED
+
+        if unit_name != "UK Estate":
+            _sheet_revenue_profit(
+                wb,
+                sheet_title=_sheet_name_with_slide(sl_opiu, f"ОПиУ_{unit_name}"),
+                chart_title=f"Выручка & Чистая прибыль {unit_name}, без НДС",
+                subtitle=f"ОПиУ {unit_name}",
+                color_rev=_COLOR_REVENUE,
+                color_net=_COLOR_NET,
+                data=u,
+                months=months,
+            )
+
+        if sl_ebitda:
+            if unit_name == "Latvia":
+                ant_objects = ["AN14 Антониас 14 (дом + парковка)"]
+                chaka_objects = ["AC89 Чака 89 (дом + парковка)"]
+                commercial_objects = [
+                    "D4 Парковка-Deglava4",
+                    "AC87 Гараж Чака",
+                    "B117 Бривибас, 117",
+                    "B78 Бривибас, 78",
+                    "C23 Цесу, 23",
+                    "DAR1_Darzauglu1",
+                    "DS1 Дзирнаву, 1",
+                    "G73 Гертрудес, 73",
+                    "H5 Хоспиталю",
+                    "MP1_Marupe",
+                    "MU3 - Mucenieku 3 - 4",
+                    "OZ1 Озолниеки",
+                    "SK3-Skunju 3",
+                    "UK_Latvia",
+                    "V22 К. Валдемара 22",
+                    "BRN_Brunieku",
+                ]
+
+                def _sum_objects(obj_list, key):
+                    result = {m: 0.0 for m in months}
+                    for obj_name in obj_list:
+                        obj = u["objects"].get(obj_name)
+                        if not obj:
+                            continue
+                        for m in months:
+                            result[m] += obj[key].get(m, 0.0) or 0.0
+                    return result
+
+                series_lat = [
+                    {
+                        "name": "Latvia",
+                        "color": _COLOR_LINE_RED,
+                        "net": u["net"].copy(),
+                        "revenue": u["revenue"].copy(),
+                    },
+                    {
+                        "name": "Антонияс",
+                        "color": "70AD47",
+                        "net": _sum_objects(ant_objects, "net"),
+                        "revenue": _sum_objects(ant_objects, "revenue"),
+                    },
+                    {
+                        "name": "Чака 89",
+                        "color": "FFC000",
+                        "net": _sum_objects(chaka_objects, "net"),
+                        "revenue": _sum_objects(chaka_objects, "revenue"),
+                    },
+                    {
+                        "name": "Коммерческие",
+                        "color": "4472C4",
+                        "net": _sum_objects(commercial_objects, "net"),
+                        "revenue": _sum_objects(commercial_objects, "revenue"),
+                    },
+                ]
+
+                series_data_05 = []
+                for s in series_lat:
+                    margin = {}
+                    for m in months:
+                        rev = s["revenue"].get(m, 0.0) or 0.0
+                        net = s["net"].get(m, 0.0) or 0.0
+                        margin[m] = (net / rev) if rev else 0.0
+                    series_data_05.append({
+                        "name": s["name"],
+                        "color": s["color"],
+                        "values": margin,
+                    })
+
+                _sheet_ebitda_multi(
+                    wb,
+                    sheet_title=_sheet_name_with_slide(
+                        sl_ebitda, f"EBITDA_{unit_name}"),
+                    chart_title="Рентабельность по чистой прибыли Latvia",
+                    subtitle="Рентабельность по ЧП (ЧП / Выручка × 100%), %",
+                    series_data=series_data_05,
+                    months=months,
+                )
+            else:
+                _sheet_ebitda(
+                    wb,
+                    sheet_title=_sheet_name_with_slide(
+                        sl_ebitda, f"EBITDA_{unit_name}"),
+                    chart_title=f"Операционная рентабельность (EBITDA margin) {unit_name}",
+                    subtitle=f"EBITDA margin {unit_name}, %",
+                    line_color=ebitda_color,
+                    data=u,
+                    months=months,
+                )
+
+        if sl_fot:
+            _sheet_fot(
+                wb,
+                sheet_title=_sheet_name_with_slide(
+                    sl_fot, f"Доля_ФОТ_{unit_name}"),
+                chart_title=f"Доля ФОТ в выручке {unit_name}",
+                subtitle=f"Анализ ОПиУ Доля ФОТ {unit_name}",
+                line_color=fot_color,
+                data=u,
+                months=months,
+            )
+
+        if bdr_path and os.path.exists(bdr_path):
+            plan_vals = _parse_bdr_plan(bdr_path, unit_name, months)
+            if any(abs(v) > 0.01 for v in plan_vals.values()):
+                sl_plan_fact_map = {
+                    "Latvia":       8,
+                    "East-Восток":  41,
+                    "Europe":       53,
+                    "Nomiqa":       75,
+                    "Unelma":       70,
+                    "UK Estate":    0,
+                }
+                sl_plan_fact = sl_plan_fact_map.get(unit_name, 0)
+
+                if sl_plan_fact:
+                    _sheet_plan_fact(
+                        wb,
+                        sheet_title=_sheet_name_with_slide(
+                            sl_plan_fact, f"ПланФакт_{unit_name}"),
+                        chart_title=f"Выполнение годового плана по ЧП {unit_name}",
+                        subtitle=f"План (БДиР) vs Факт (ОПиУ) — {unit_name}",
+                        data_plan=plan_vals,
+                        data_fact=u["net"],
+                        months=months,
+                    )
+
+                sl_cumulative = {
+                    "Latvia":      9,
+                    "East-Восток": 43,
+                    "Europe":      0,
+                    "Nomiqa":      74,
+                    "Unelma":      69,
+                    "UK Estate":   0,
+                }.get(unit_name)
+
+                if sl_cumulative:
+                    _sheet_cumulative_plan_fact(
+                        wb,
+                        sheet_title=_sheet_name_with_slide(
+                            sl_cumulative, f"Итог_{unit_name}"),
+                        chart_title=f"Выполнение годового плана по чистой прибыли {unit_name}",
+                        data_plan=plan_vals,
+                        data_fact=u["net"],
+                        months=months,
+                        plan_label=f"ЧП {unit_name} план (с НДС)",
+                        fact_label=f"ЧП {unit_name} факт (с НДС)",
+                    )
+
+    # ... остальной код без изменений ...
+
+    # СОРТИРОВКА И СОХРАНЕНИЕ
+    _sort_sheets_by_slide_number(wb)
+    wb.save(output_path)
+    print(f"[OK] Диаграммы сохранены: {output_path}")
+    return output_path
+
+
+def _sort_sheets_by_slide_number(wb):
+    import re as _re
+
+    def _slide_key(ws):
+        m = _re.search(r"Сл(\d+)", ws.title)
+        if m:
+            return (0, int(m.group(1)), ws.title)
+        return (1, 10**9, ws.title)
+
+    try:
+        desired = sorted(wb.worksheets, key=_slide_key)
+        wb._sheets = desired
+        print(f"[presentation_builder] листы отсортированы, порядок: "
+              f"{[ws.title[:10] for ws in wb.worksheets]}")
+    except Exception as e:
+        print(f"[presentation_builder] не удалось отсортировать листы: {e}")
