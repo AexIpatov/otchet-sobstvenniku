@@ -108,8 +108,8 @@ _CELL_BORDER   = Border(
 )
 
 # Цвета серий (как в презентации)
-_COLOR_REVENUE = "FFC000"   # жёлтый  (Выручка)
-_COLOR_NET     = "70AD47"   # зелёный (ЧП)
+_COLOR_REVENUE = "FFFF99"   # светло-жёлтый  (Выручка)
+_COLOR_NET     = "99FF99"   # светло-зелёный (ЧП)
 _COLOR_LINE_RED = "C00000"  # красный (EBITDA Латвия, Доля ФОТ Латвия)
 _COLOR_LINE_YEL = "FFC000"  # жёлтый  (EBITDA Чака, EBITDA Коммерческие, EBITDA Матиса)
 _COLOR_LINE_BLU = "4472C4"  # синий   (Доля ФОТ — общий цвет)
@@ -1451,8 +1451,10 @@ def _sheet_revenue_profit(wb, sheet_title, chart_title, subtitle,
 
     chart.series[0].graphicalProperties.solidFill = color_rev
     chart.series[0].graphicalProperties.line.solidFill = color_rev
+    chart.series[0].invertIfNegative = False
     chart.series[1].graphicalProperties.solidFill = color_net
     chart.series[1].graphicalProperties.line.solidFill = color_net
+    chart.series[1].invertIfNegative = False
 
     chart.dLbls = DataLabelList()
     chart.dLbls.showVal = True
@@ -1887,8 +1889,8 @@ def _sheet_rentability_latvia(wb, sheet_title, chart_title, subtitle,
     chart.y_axis.delete = False
     chart.y_axis.majorGridlines = None
     chart.y_axis.numFmt = '0%'
-    chart.y_axis.scaling.min = 0.0
-    chart.y_axis.scaling.max = 0.7
+    chart.y_axis.scaling.min = 0.30
+    chart.y_axis.scaling.max = 0.70
 
     for idx, (_, _, _, color) in enumerate(series):
         if idx < len(chart.series):
@@ -2068,6 +2070,7 @@ def _sheet_profit_dynamics(wb, sheet_title, chart_title, subtitle,
             chart.series[idx].graphicalProperties.solidFill = s["color"]
             chart.series[idx].graphicalProperties.line.solidFill = "FFFFFF"
             chart.series[idx].graphicalProperties.line.width = 10000
+            chart.series[idx].invertIfNegative = False
 
     chart.dLbls = DataLabelList()
     chart.dLbls.showVal = True
@@ -2251,7 +2254,8 @@ def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
     cats = Reference(ws, min_col=1,
                      min_row=header_row + 1,
                      max_row=header_row + len(months))
-    data_ref = Reference(ws, min_col=2, max_col=4,
+    # Только 2 серии — План (B) и Факт (C). Третью (% выполнения) убираем.
+    data_ref = Reference(ws, min_col=2, max_col=3,
                          min_row=header_row,
                          max_row=header_row + len(months))
 
@@ -2269,11 +2273,12 @@ def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
     chart.y_axis.delete = False
     chart.y_axis.majorGridlines = None
     chart.y_axis.numFmt = '#,##0'
-    chart.y_axis.title = "EUR"
 
-    # --- План: подпись сверху ---
+    # --- План: жёлтый, подпись сверху, красная граница 3 пт ---
     chart.series[0].graphicalProperties.solidFill = _COLOR_LINE_YEL
-    chart.series[0].graphicalProperties.line.solidFill = _COLOR_LINE_YEL
+    chart.series[0].graphicalProperties.line.solidFill = "FF0000"
+    chart.series[0].graphicalProperties.line.width = 38100
+    chart.series[0].invertIfNegative = False
     chart.series[0].dLbls = DataLabelList()
     chart.series[0].dLbls.showVal = True
     chart.series[0].dLbls.showSerName = False
@@ -2282,9 +2287,11 @@ def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
     chart.series[0].dLbls.numFmt = '#,##0'
     chart.series[0].dLbls.position = "outEnd"
 
-    # --- Факт: подпись внутри ---
+    # --- Факт: зелёный, подпись внутри, красная граница 3 пт ---
     chart.series[1].graphicalProperties.solidFill = _COLOR_NET
-    chart.series[1].graphicalProperties.line.solidFill = _COLOR_NET
+    chart.series[1].graphicalProperties.line.solidFill = "FF0000"
+    chart.series[1].graphicalProperties.line.width = 38100
+    chart.series[1].invertIfNegative = False
     chart.series[1].dLbls = DataLabelList()
     chart.series[1].dLbls.showVal = True
     chart.series[1].dLbls.showSerName = False
@@ -2293,33 +2300,21 @@ def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
     chart.series[1].dLbls.numFmt = '#,##0'
     chart.series[1].dLbls.position = "inEnd"
 
-    # --- % выполнения: НЕВИДИМЫЙ, подписи снизу (розовые) ---
-    chart.series[2].graphicalProperties.solidFill = "FFFFFF"
-    chart.series[2].graphicalProperties.line.solidFill = "FFFFFF"
-    chart.series[2].dLbls = DataLabelList()
-    chart.series[2].dLbls.showVal = True
-    chart.series[2].dLbls.showSerName = False
-    chart.series[2].dLbls.showCatName = False
-    chart.series[2].dLbls.showLegendKey = False
-    chart.series[2].dLbls.numFmt = '0"%"'
-    chart.series[2].dLbls.position = "outEnd"
-
-    # Розовый цвет подписей третьей серии
-    _rose_rt = RichText(
-        bodyPr=RichTextProperties(),
-        p=[Paragraph(
-            pPr=ParagraphProperties(
-                defRPr=CharacterProperties(solidFill="FF00FF", sz=900)
-            ),
-            endParaRPr=CharacterProperties(solidFill="FF00FF", sz=900),
-        )],
-    )
-    chart.series[2].dLbls.txPr = _rose_rt
-
     chart.legend.position = "b"
     chart.legend.overlay = False
 
     ws.add_chart(chart, "E4")
+
+    # --- Проценты выполнения выносим ПОД диаграмму как сиреневый текст ---
+    pct_row = header_row + len(months) + 2
+    ws.cell(row=pct_row, column=1, value="% выполнения:")
+    for i, m in enumerate(months):
+        plan = data_plan.get(m, 0.0) or 0.0
+        fact = data_fact.get(m, 0.0) or 0.0
+        pct = (fact / plan * 100.0) if plan else 0.0
+        c = ws.cell(row=pct_row, column=2 + i, value=f"{pct:.0f}%")
+        c.font = Font(color="FF00FF", bold=True, size=10)
+        c.alignment = Alignment(horizontal="center")
 
 # ------------------------------------------------------------
 # Лист: Таблица «Операционное сальдо» (слайды 2 и 37)
@@ -4501,6 +4496,8 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
     chart.type = "bar"
     chart.grouping = "stacked"
     chart.overlap = 100
+    # Отключаем инверсию для отрицательных значений
+    # (иначе Excel перекрашивает их в другой цвет)
 
     data_ref = Reference(
         ws,
@@ -4524,6 +4521,7 @@ def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
             series.graphicalProperties.solidFill = color
             series.graphicalProperties.line.solidFill = "FFFFFF"
             series.graphicalProperties.line.width = 10000
+            series.invertIfNegative = False
 
     chart.width = 32
     chart.height = 11
