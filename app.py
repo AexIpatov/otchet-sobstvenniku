@@ -896,12 +896,14 @@ with tab_presentation:
             st.warning(f"Не удалось сохранить файл долгов: {e}")
 
     total_pres_uploaded = (
-        n_opiu_full + n_bdr_full + n_odds + n_ku + n_invest + n_debts
+        n_opiu_full + n_bdr_full + n_odds
+        + n_ku + n_invest + n_debts
     )
     if total_pres_uploaded > 0:
         st.success(
             f"✅ Сохранено: ОПиУ (за год) — {n_opiu_full}, "
-            f"БДиР (сводный) — {n_bdr_full}, ОДДС — {n_odds}, "
+            f"БДиР (сводный) — {n_bdr_full}, "
+            f"ОДДС — {n_odds}, "
             f"Возмещение КУ — {n_ku}, Вложений — {n_invest}, "
             f"Долгов — {n_debts}."
         )
