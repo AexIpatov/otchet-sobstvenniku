@@ -2274,10 +2274,9 @@ def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
     chart.y_axis.majorGridlines = None
     chart.y_axis.numFmt = '#,##0'
 
-    # --- План: жёлтый, подпись сверху, красная граница 3 пт ---
+    # --- План: жёлтый, подпись сверху, БЕЗ красной обводки ---
     chart.series[0].graphicalProperties.solidFill = _COLOR_LINE_YEL
-    chart.series[0].graphicalProperties.line.solidFill = "FF0000"
-    chart.series[0].graphicalProperties.line.width = 38100
+    chart.series[0].graphicalProperties.line.solidFill = _COLOR_LINE_YEL
     chart.series[0].invertIfNegative = False
     chart.series[0].dLbls = DataLabelList()
     chart.series[0].dLbls.showVal = True
@@ -2287,10 +2286,9 @@ def _sheet_plan_fact(wb, sheet_title, chart_title, subtitle,
     chart.series[0].dLbls.numFmt = '#,##0'
     chart.series[0].dLbls.position = "outEnd"
 
-    # --- Факт: зелёный, подпись внутри, красная граница 3 пт ---
+    # --- Факт: зелёный, подпись внутри, БЕЗ красной обводки ---
     chart.series[1].graphicalProperties.solidFill = _COLOR_NET
-    chart.series[1].graphicalProperties.line.solidFill = "FF0000"
-    chart.series[1].graphicalProperties.line.width = 38100
+    chart.series[1].graphicalProperties.line.solidFill = _COLOR_NET
     chart.series[1].invertIfNegative = False
     chart.series[1].dLbls = DataLabelList()
     chart.series[1].dLbls.showVal = True
@@ -2959,6 +2957,150 @@ def _parse_odds_balance(odds_path, unit_name, months):
 
     result["rows"] = rows_out
     return result
+
+# ============================================================
+# ЛИСТ «НАРАСТАЮЩИМ ИТОГОМ»
+# ============================================================
+
+_MONTH_FILL = {
+    1: "4472C4", 2: "8FAADC", 3: "FFC000", 4: "548235",
+    5: "ED7D31", 6: "9DC3E6", 7: "7030A0", 8: "BFB100",
+    9: "2E4C99", 10: "C55A11", 11: "375623", 12: "203864",
+}
+
+
+def _sheet_cumulative_plan_fact(wb, sheet_title, chart_title,
+                                data_plan, data_fact, months,
+                                plan_label, fact_label):
+    """
+    Лист «Нарастающим итогом» — горизонтальная stacked-диаграмма.
+    План сверху, Факт снизу. Цвета серий — по месяцам.
+    """
+    ws = wb.create_sheet(sheet_title)
+
+    header_row = 2
+    fact_row   = 3
+    plan_row   = 4
+
+    ws.cell(row=header_row, column=1, value="Показатель").font = Font(bold=True)
+    for i, m in enumerate(months, start=2):
+        ws.cell(row=header_row, column=i,
+                value=_MONTHS_RU_LOWER[m].capitalize()).font = Font(bold=True)
+
+    ws.cell(row=fact_row, column=1, value="Факт").font = Font(bold=True)
+    ws.cell(row=plan_row, column=1, value="План").font = Font(bold=True)
+
+    for i, m in enumerate(months, start=2):
+        hc = ws.cell(row=header_row, column=i)
+        hc.font = Font(color="FFFFFF", size=8)
+
+        fc = ws.cell(row=fact_row, column=i,
+                     value=float(data_fact.get(m, 0.0) or 0.0))
+        fc.number_format = '#,##0'
+        fc.font = Font(color="FFFFFF", size=8)
+
+        pc = ws.cell(row=plan_row, column=i,
+                     value=float(data_plan.get(m, 0.0) or 0.0))
+        pc.number_format = '#,##0'
+        pc.font = Font(color="FFFFFF", size=8)
+
+    chart = BarChart()
+    chart.type = "bar"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+
+    data_ref = Reference(
+        ws,
+        min_col=2, max_col=1 + len(months),
+        min_row=header_row, max_row=plan_row,
+    )
+    cats_ref = Reference(
+        ws,
+        min_col=1,
+        min_row=fact_row, max_row=plan_row,
+    )
+
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats_ref)
+
+    for idx, series in enumerate(chart.series):
+        if idx < len(months):
+            m = months[idx]
+            color = _MONTH_FILL.get(m, "808080")
+            series.graphicalProperties.solidFill = color
+            series.graphicalProperties.line.solidFill = "FFFFFF"
+            series.graphicalProperties.line.width = 10000
+            series.invertIfNegative = False
+
+    chart.width = 32
+    chart.height = 11
+    chart.title = chart_title
+
+    chart.dLbls = DataLabelList()
+    chart.dLbls.showVal = True
+    chart.dLbls.showSerName = False
+    chart.dLbls.showCatName = False
+    chart.dLbls.showLegendKey = False
+    chart.dLbls.numFmt = '#,##0'
+    chart.dLbls.position = "ctr"
+
+    chart.legend.position = "t"
+    chart.legend.overlay = False
+
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.x_axis.numFmt = '#,##0'
+    chart.x_axis.majorTickMark = "out"
+    chart.x_axis.tickLblPos = "nextTo"
+    chart.x_axis.title = "Периоды"
+    chart.y_axis.majorTickMark = "out"
+    chart.y_axis.tickLblPos = "nextTo"
+    chart.x_axis.majorGridlines = None
+    chart.y_axis.majorGridlines = None
+
+    from openpyxl.utils import column_index_from_string
+    anchor_col_idx = column_index_from_string("A") - 1
+    anchor_row_idx = 6 - 1
+    anchor = OneCellAnchor(
+        _from=AnchorMarker(
+            col=anchor_col_idx, colOff=0,
+            row=anchor_row_idx, rowOff=0,
+        ),
+        ext=XDRPositiveSize2D(
+            cx=cm_to_EMU(chart.width),
+            cy=cm_to_EMU(chart.height),
+        ),
+    )
+    chart.anchor = anchor
+    ws.add_chart(chart)
+
+    # Блок итогов справа
+    sum_plan = sum(float(data_plan.get(m, 0.0) or 0.0) for m in months)
+    sum_fact = sum(float(data_fact.get(m, 0.0) or 0.0) for m in months)
+    pct = (sum_fact / sum_plan) if sum_plan else 0.0
+
+    box_col = max(13, len(months) + 5)
+    box_row = 2
+
+    for i, (val, fmt) in enumerate([
+        (round(sum_plan, 0), '#,##0'),
+        (round(sum_fact, 0), '#,##0'),
+        (round(pct, 4),      '0.0%'),
+    ]):
+        c_val = ws.cell(row=box_row + i, column=box_col, value=val)
+        c_val.font = Font(bold=True, color="FFC000", size=14)
+        c_val.alignment = Alignment(horizontal="center", vertical="center")
+        c_val.fill = PatternFill("solid", fgColor="1F3864")
+        c_val.border = _CELL_BORDER
+        c_val.number_format = fmt
+
+    ws.column_dimensions["A"].width = 22
+    for i in range(2, 2 + len(months)):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    ws.column_dimensions[get_column_letter(box_col)].width = 14
+
+    ws.sheet_view.showGridLines = False
+    return ws
 
 def build_presentation_data(opiu_path, bdr_path, forecast_path,
                             year, month, output_path):
